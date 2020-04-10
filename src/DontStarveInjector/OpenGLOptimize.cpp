@@ -25,7 +25,7 @@ PFNGLVERTEXATTRIBDIVISORPROC glVertexAttribDivisor;
 typedef void (_stdcall* PFNGLVERTEXATTRIBPOINTERARBPROC) (int index, int size, int type, bool normalized, int stride, const void* pointer);
 PFNGLVERTEXATTRIBPOINTERARBPROC glVertexAttribPointer;
 
-typedef void (_stdcall* PFNGLSHADERSOURCEPROC) (int shader, int count, const char* const* string, const int* length);
+typedef void (_stdcall* PFNGLSHADERSOURCEPROC) (int shader, int count, const char* const* strings, const int* length);
 PFNGLSHADERSOURCEPROC glShaderSource;
 
 const char* instancedVertexShader = "\n\
@@ -65,7 +65,7 @@ void main()\n\
 void _stdcall Hook_glShaderSource(int shader, int count, const char* strings[], const int* length) {
 	/*
 	for (int i = 0; i < count; i++) {
-		if (strstr(strings[i], "uniform mat4 MatrixW") != nullptr) {
+		if (strstr(strings[i], "uniform mat4 MatrixW") != NULL) {
 			strings[i] = instancedVertexShader;
 		}
 	}*/
@@ -77,11 +77,30 @@ struct Object {
 
 };
 
+
 struct GLContext {
 	GLContext() {
 		HMODULE glModule = GetModuleHandleA("libglesv2.dll");
 		if (glModule == NULL)
 			return;
+
+		HMODULE hModule = GetModuleHandleA(NULL);
+		// Hook DrawArraysSprite
+		const char machineCode[] = { 0x56, 0x8B, 0xF1, 0x8B, 0x06, 0x8B, 0x50, 0x08, 0x57, 0xFF, 0xD2, 0x8B, 0x44, 0x24, 0x0C };
+		IMAGE_NT_HEADERS* header = ::ImageNtHeader(hModule);
+
+		for (BYTE* p = (BYTE*)hModule + header->OptionalHeader.BaseOfCode; p < (BYTE*)hModule + header->OptionalHeader.BaseOfCode + header->OptionalHeader.SizeOfCode - 32; p += 16) {
+			if (memcmp(p, machineCode, sizeof(machineCode)) == 0) {
+				// Match!
+				char jmpCode[5] = { 0xe9, 0, 0, 0, 0 };
+				DWORD oldProtect;
+				::VirtualProtect(p, 5, PAGE_EXECUTE_READWRITE, &oldProtect);
+				*(DWORD*)(jmpCode + 1) = (DWORD)&DrawArraysSprite - 5 - (DWORD)p;
+				memcpy(p, jmpCode, 5);
+				::VirtualProtect(p, 5, oldProtect, &oldProtect);
+				break;
+			}
+		}
 
 		glBindBuffer = (PFNGLBINDBUFFERARBPROC)GetProcAddress(glModule, "glBindBuffer");
 		glBufferData = (PFNGLBUFFERDATAARBPROC)GetProcAddress(glModule, "glBufferData");
@@ -92,7 +111,6 @@ struct GLContext {
 		glVertexAttribPointer = (PFNGLVERTEXATTRIBPOINTERARBPROC)GetProcAddress(glModule, "glVertexAttribPointer");
 		glShaderSource = (PFNGLSHADERSOURCEPROC)GetProcAddress(glModule, "glShaderSource");
 
-		HMODULE hModule = GetModuleHandleA("dontstarve_steam.exe");
 		ULONG size;
 
 		for (PIMAGE_IMPORT_DESCRIPTOR desc = (PIMAGE_IMPORT_DESCRIPTOR)::ImageDirectoryEntryToData(hModule, TRUE,
@@ -116,11 +134,14 @@ struct GLContext {
 		}
 	}
 
-	void __thiscall DrawArraysSprite(Object* object, int first, int count, int primType)
+	static void _stdcall DrawArraysSprite(Object* object, int first, int count, int primType)
 	{
+		GLContext* _this;
+		_asm mov _this, ecx;
+
 		typedef void (GLContext::*PFNSETMATERIAL)();
-		PFNSETMATERIAL SetMaterial = *(PFNSETMATERIAL*)(*(const char**)this + 8); // 2nd virtual function of Context
-		(this->*SetMaterial)();
+//		PFNSETMATERIAL SetMaterial = *(PFNSETMATERIAL*)(*(const char**)this + 8); // 2nd virtual function of Context
+	//	(this->*SetMaterial)();
 	}
 } context;
 

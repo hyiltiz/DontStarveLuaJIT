@@ -546,7 +546,7 @@ static void Hook(BYTE* from, BYTE* to) {
 	unsigned char code[5] = { 0xe9, 0x00, 0x00, 0x00, 0x00 };
 	*(DWORD*)(code + 1) = (DWORD)to - (DWORD)from - 5;
 	DWORD oldProtect;
-	::VirtualProtect(from, 5, PAGE_READWRITE, &oldProtect);
+	::VirtualProtect(from, 5, PAGE_EXECUTE_READWRITE, &oldProtect);
 	::memcpy(from, code, 5);
 	::VirtualProtect(from, 5, oldProtect, &oldProtect);
 }

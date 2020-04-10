@@ -77,7 +77,6 @@ struct Object {
 
 };
 
-
 struct GLContext {
 	GLContext() {
 		HMODULE glModule = GetModuleHandleA("libglesv2.dll");
@@ -86,19 +85,29 @@ struct GLContext {
 
 		HMODULE hModule = GetModuleHandleA(NULL);
 		// Hook DrawArraysSprite
-		const char machineCode[] = { 0x56, 0x8B, 0xF1, 0x8B, 0x06, 0x8B, 0x50, 0x08, 0x57, 0xFF, 0xD2, 0x8B, 0x44, 0x24, 0x0C };
+		const char startCode[] = { 0x56, 0x8B, 0xF1, 0x8B, 0x06, 0x8B, 0x50, 0x08, 0x57, 0xFF, 0xD2, 0x8B, 0x44, 0x24, 0x0C, 0x50, 0x6A, 0x04, 0x8B, 0xCE, 0xE8 };
+		const char endCode[] = { 0x5F, 0x5E, 0xC2, 0x10, 0x00 };
 		IMAGE_NT_HEADERS* header = ::ImageNtHeader(hModule);
 
-		for (BYTE* p = (BYTE*)hModule + header->OptionalHeader.BaseOfCode; p < (BYTE*)hModule + header->OptionalHeader.BaseOfCode + header->OptionalHeader.SizeOfCode - 32; p += 16) {
-			if (memcmp(p, machineCode, sizeof(machineCode)) == 0) {
-				// Match!
-				char jmpCode[5] = { 0xe9, 0, 0, 0, 0 };
-				DWORD oldProtect;
-				::VirtualProtect(p, 5, PAGE_EXECUTE_READWRITE, &oldProtect);
-				*(DWORD*)(jmpCode + 1) = (DWORD)&DrawArraysSprite - 5 - (DWORD)p;
-				memcpy(p, jmpCode, 5);
-				::VirtualProtect(p, 5, oldProtect, &oldProtect);
-				break;
+		for (BYTE* p = (BYTE*)hModule + header->OptionalHeader.BaseOfCode; p < (BYTE*)hModule + header->OptionalHeader.BaseOfCode + header->OptionalHeader.SizeOfCode - 0x200; p += 16) {
+			if (memcmp(p, startCode, sizeof(startCode)) == 0) {
+				bool match = false;
+				for (BYTE* q = p; q < p + 0x100; q++) {
+					if (memcmp(q, endCode, sizeof(endCode)) == 0) {
+						match = true;
+					}
+				}
+
+				if (match) {
+					// Match!
+					char jmpCode[5] = { 0xe9, 0, 0, 0, 0 };
+					DWORD oldProtect;
+					::VirtualProtect(p, 5, PAGE_EXECUTE_READWRITE, &oldProtect);
+					*(DWORD*)(jmpCode + 1) = (DWORD)&GLContext::DrawArraysSprite - 5 - (DWORD)p;
+					memcpy(p, jmpCode, 5);
+					::VirtualProtect(p, 5, oldProtect, &oldProtect);
+					break;
+				}
 			}
 		}
 
@@ -140,8 +149,8 @@ struct GLContext {
 		_asm mov _this, ecx;
 
 		typedef void (GLContext::*PFNSETMATERIAL)();
-//		PFNSETMATERIAL SetMaterial = *(PFNSETMATERIAL*)(*(const char**)this + 8); // 2nd virtual function of Context
-	//	(this->*SetMaterial)();
+		PFNSETMATERIAL SetMaterial = *(PFNSETMATERIAL*)(*(const char**)_this + 8); // 2nd virtual function of Context
+		//(_this->*SetMaterial)();
 	}
 } context;
 

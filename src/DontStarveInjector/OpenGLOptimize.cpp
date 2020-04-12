@@ -50,6 +50,10 @@ PFNGLCREATEPROGRAMPROC glCreateProgram;
 typedef void (_stdcall * PFNGLBUFFERSUBDATAPROC) (int target, int offset, int size, const void* data);
 PFNGLBUFFERSUBDATAPROC glBufferSubData;
 
+
+typedef void (_stdcall * PFNGLDRAWARRAYSPROC) (int, int, int);
+PFNGLDRAWARRAYSPROC glDrawArrays;
+
 const char* instancedVertexShader = "\n\
 uniform mat4 MatrixP;\n\
 uniform mat4 MatrixV;\n\
@@ -203,7 +207,7 @@ void UpdateWorldMatrices() {
 		if (instancedBuffer == 0) {
 			glGenBuffers(1, &instancedBuffer);
 			glBindBuffer(GL_ARRAY_BUFFER, instancedBuffer);
-			glBufferData(GL_ARRAY_BUFFER, sizeof(Matrix) * instancedBufferData.size(), nullptr, GL_DYNAMIC_DRAW);
+			glBufferData(GL_ARRAY_BUFFER, sizeof(Matrix) * instancedBufferData.size(), NULL, GL_DYNAMIC_DRAW);
 		} else {
 			glBindBuffer(GL_ARRAY_BUFFER, instancedBuffer);
 			if (bufferSizeChanged) {
@@ -224,10 +228,10 @@ void _stdcall Hook_glUseProgram(int program) {
 		if (instancedProgram == 0) {
 			instancedProgram = glCreateProgram();
 			int vs = glCreateShader(GL_VERTEX_SHADER);
-			glShaderSource(vs, 1, &instancedVertexShader, nullptr);
+			glShaderSource(vs, 1, &instancedVertexShader, NULL);
 			glCompileShader(vs);
 			int fs = glCreateShader(GL_FRAGMENT_SHADER);
-			glShaderSource(fs, 1, &instancedFragmentShader, nullptr);
+			glShaderSource(fs, 1, &instancedFragmentShader, NULL);
 			glCompileShader(fs);
 			glAttachShader(instancedProgram, vs);
 			glAttachShader(instancedProgram, fs);
@@ -244,40 +248,32 @@ struct Object {
 
 };
 
+template <class D, class T>
+D ForceCast(T t) {
+	union {
+		D d;
+		T t;
+	} p;
+
+	p.t = t;
+	return p.d;
+}
+
 struct GLContext {
-	GLContext() {
-		HMODULE glModule = GetModuleHandleA("libglesv2.dll");
-		if (glModule == NULL)
-			return;
+	typedef void (_stdcall *PFNPREPAREVERTEXBUFFER)(int, Object*);
+	static PFNPREPAREVERTEXBUFFER PrepareVertexBuffer;
 
-		HMODULE hModule = GetModuleHandleA(NULL);
-		// Hook DrawArraysSprite
-		const unsigned char startCode[] = { 0x56, 0x8B, 0xF1, 0x8B, 0x06, 0x8B, 0x50, 0x08, 0x57, 0xFF, 0xD2, 0x8B, 0x44, 0x24, 0x0C, 0x50, 0x6A, 0x04, 0x8B, 0xCE, 0xE8 };
-		const unsigned char endCode[] = { 0x5F, 0x5E, 0xC2, 0x10, 0x00 };
-		IMAGE_NT_HEADERS* header = ::ImageNtHeader(hModule);
+	typedef void (_stdcall *PFNBINDVERTEXBUFFER)();
+	static PFNBINDVERTEXBUFFER BindVertexBuffer;
 
-		for (BYTE* p = (BYTE*)hModule + header->OptionalHeader.BaseOfCode; p < (BYTE*)hModule + header->OptionalHeader.BaseOfCode + header->OptionalHeader.SizeOfCode - 0x200; p += 16) {
-			if (memcmp(p, startCode, sizeof(startCode)) == 0) {
-				bool match = false;
-				for (BYTE* q = p; q < p + 0x100; q++) {
-					if (memcmp(q, endCode, sizeof(endCode)) == 0) {
-						match = true;
-					}
-				}
+	typedef const char* (*PFNGETBUFFER)(void*, DWORD);
+	static PFNGETBUFFER GetBuffer;
+	
+	typedef void (*PFNFREE)(int);
+	static PFNFREE Free;
 
-				if (match) {
-					// Match!
-					unsigned char jmpCode[5] = { 0xe9, 0, 0, 0, 0 };
-					DWORD oldProtect;
-					::VirtualProtect(p, 5, PAGE_EXECUTE_READWRITE, &oldProtect);
-					*(DWORD*)(jmpCode + 1) = (DWORD)&GLContext::DrawArraysSprite - 5 - (DWORD)p;
-					memcpy(p, jmpCode, 5);
-					::VirtualProtect(p, 5, oldProtect, &oldProtect);
-					break;
-				}
-			}
-		}
 
+	void GetGLAddresses(HMODULE glModule) {
 		glBindBuffer = (PFNGLBINDBUFFERARBPROC)GetProcAddress(glModule, "glBindBuffer");
 		glBufferData = (PFNGLBUFFERDATAARBPROC)GetProcAddress(glModule, "glBufferData");
 		glGenBuffers = (PFNGLGENBUFFERSARBPROC)GetProcAddress(glModule, "glGenBuffers");
@@ -293,15 +289,17 @@ struct GLContext {
 		glAttachShader = (PFNGLATTACHSHADERPROC)GetProcAddress(glModule, "glAttachShader");
 		glLinkProgram = (PFNGLLINKPROGRAMPROC)GetProcAddress(glModule, "glLinkProgram");
 		glBufferSubData = (PFNGLBUFFERSUBDATAPROC)GetProcAddress(glModule, "glBufferSubData");
+		glDrawArrays = (PFNGLDRAWARRAYSPROC)GetProcAddress(glModule, "glDrawArrays");
+	}
 
+	void SetupGLHooks(HMODULE hModule, HMODULE glModule) {
 		ULONG size;
 
 		for (PIMAGE_IMPORT_DESCRIPTOR desc = (PIMAGE_IMPORT_DESCRIPTOR)::ImageDirectoryEntryToData(hModule, TRUE,
 			IMAGE_DIRECTORY_ENTRY_IMPORT, &size); desc->Name != 0; desc++) {
 			LPSTR pszMod = (LPSTR)((DWORD)hModule + desc->Name);
 			if (_stricmp(pszMod, "libglesv2.dll") == 0) {
-				for (PIMAGE_THUNK_DATA thunk = (PIMAGE_THUNK_DATA)(desc->FirstThunk + (DWORD)hModule); thunk->u1.Function != 0; thunk++)
-				{
+				for (PIMAGE_THUNK_DATA thunk = (PIMAGE_THUNK_DATA)(desc->FirstThunk + (DWORD)hModule); thunk->u1.Function != 0; thunk++) {
 					void** p = (void**)thunk->u1.Function;
 					if (*p == glUseProgram)
 					{
@@ -317,20 +315,103 @@ struct GLContext {
 		}
 	}
 
+	void SetupClientHooks(HMODULE hModule) {
+		// Hook DrawArraysSprite
+		const unsigned char startCode[] = { 0x56, 0x8B, 0xF1, 0x8B, 0x06, 0x8B, 0x50, 0x08, 0x57, 0xFF, 0xD2, 0x8B, 0x44, 0x24, 0x0C, 0x50, 0x6A, 0x04, 0x8B, 0xCE, 0xE8 };
+		const unsigned char endCode[] = { 0x5F, 0x5E, 0xC2, 0x10, 0x00 };
+		IMAGE_NT_HEADERS* header = ::ImageNtHeader(hModule);
+
+		for (BYTE* p = (BYTE*)hModule + header->OptionalHeader.BaseOfCode; p < (BYTE*)hModule + header->OptionalHeader.BaseOfCode + header->OptionalHeader.SizeOfCode - 0x200; p += 16) {
+			if (memcmp(p, startCode, sizeof(startCode)) == 0) {
+				for (BYTE* q = p; q < p + 0x100; q++) {
+					if (memcmp(q, endCode, sizeof(endCode)) == 0) {
+						// search for necessary functions
+						if (p[0x14] == 0xe8) {
+							PrepareVertexBuffer = ForceCast<PFNPREPAREVERTEXBUFFER>(*(DWORD*)&p[0x15] + (DWORD)p + 5 + 0x14);
+						}
+
+						if (p[0x1B] == 0xe8) {
+							BindVertexBuffer = ForceCast<PFNBINDVERTEXBUFFER>(*(DWORD*)&p[0x1C] + (DWORD)p + 5 + 0x1B);
+						}
+
+						if (p[0x2A] == 0xe8) {
+							GetBuffer = ForceCast<PFNGETBUFFER>(*(DWORD*)&p[0x2B] + (DWORD)p + 5 + 0x2A);
+						}
+
+						if (p[0xA0] == 0xe8) {
+							Free = ForceCast<PFNFREE>(*(DWORD*)&p[0xA1] + (DWORD)p + 5 + 0xA0);
+						}
+
+						// Match!
+						unsigned char jmpCode[5] = { 0xe9, 0, 0, 0, 0 };
+						DWORD oldProtect;
+						::VirtualProtect(p, 5, PAGE_EXECUTE_READWRITE, &oldProtect);
+						*(DWORD*)(jmpCode + 1) = (DWORD)&GLContext::DrawArraysSprite - 5 - (DWORD)p;
+						memcpy(p, jmpCode, 5);
+						::VirtualProtect(p, 5, oldProtect, &oldProtect);
+						return;
+					}
+				}
+			}
+		}
+
+
+		printf("Setup client hooks failed!\n");
+	}
+
+	GLContext() {
+		HMODULE glModule = GetModuleHandleA("libglesv2.dll");
+		if (glModule == NULL)
+			return;
+
+		HMODULE hModule = GetModuleHandleA(NULL);
+		GetGLAddresses(glModule);
+		SetupGLHooks(hModule, glModule);
+		SetupClientHooks(hModule);
+
+	}
+
 	static void _stdcall DrawArraysSprite(Object* object, int first, int count, int primType)
 	{
 		GLContext* _this;
 		_asm mov _this, ecx;
 		ReplaceProgram = true;
 
-		typedef void (GLContext::*PFNSETMATERIAL)();
-		PFNSETMATERIAL SetMaterial = *(PFNSETMATERIAL*)(*(const char**)_this + 8); // 2nd virtual function of Context
-		(_this->*SetMaterial)();
+		typedef void (_stdcall *PFNBINDMATERIAL)();
+		PFNBINDMATERIAL BindMaterial = ForceCast<PFNBINDMATERIAL>(*(DWORD*)(*(const char**)_this + 8)); // 2nd virtual function of Context
+		
+		_asm mov ecx, _this;
+		BindMaterial();
 
-		// Set instanced buffers
+		_asm mov ecx, _this;
+		PrepareVertexBuffer(4, object);
 
+		_asm mov ecx, _this;
+		const char* buffer = GetBuffer(*(void**)((char*)_this + 444), *(DWORD*)((char*)_this + 44));
+
+		typedef void (_stdcall *PFNSETMATERIAL)(DWORD, const char*);
+		PFNSETMATERIAL SetMaterial = ForceCast<PFNSETMATERIAL>(*(DWORD*)(*(DWORD*)buffer + 8));
+
+		_asm mov ecx, _this;
+		SetMaterial(*(DWORD*)(_this + 420), (const char*)_this + 16);
+
+		if (*(DWORD *)(_this + 32) != -1) {
+			glBindBuffer(34963, 0);
+			*(DWORD *)(_this + 32) = -1;
+		}
+
+		glDrawArrays(0x0004, first, count);
+
+		_asm mov ecx, _this;
+		Free(4);
 		ReplaceProgram = false;
 	}
 } context;
+
+GLContext::PFNPREPAREVERTEXBUFFER GLContext::PrepareVertexBuffer = NULL;
+GLContext::PFNBINDVERTEXBUFFER GLContext::BindVertexBuffer = NULL;
+GLContext::PFNGETBUFFER GLContext::GetBuffer = NULL;
+GLContext::PFNFREE GLContext::Free = NULL;
+
 
 #pragma endregion OpenGL

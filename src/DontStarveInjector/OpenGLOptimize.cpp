@@ -1,5 +1,6 @@
 #include <Windows.h>
 #include <dbghelp.h>
+#include <vector>
 #pragma comment(lib, "dbghelp.lib")
 
 #pragma region OpenGL
@@ -10,10 +11,10 @@ PFNGLBINDBUFFERARBPROC glBindBuffer;
 typedef void(_stdcall* PFNGLBUFFERDATAARBPROC)(int target, int size, const void* data, int usage);
 PFNGLBUFFERDATAARBPROC glBufferData;
 
-typedef void(_stdcall* PFNGLGENBUFFERSARBPROC)(int n, unsigned int* buffers);
+typedef void(_stdcall* PFNGLGENBUFFERSARBPROC)(int n, int* buffers);
 PFNGLGENBUFFERSARBPROC glGenBuffers;
 
-typedef void(_stdcall* PFNGLDELETEBUFFERSARBPROC)(int n, const unsigned int* buffers);
+typedef void(_stdcall* PFNGLDELETEBUFFERSARBPROC)(int n, const int* buffers);
 PFNGLDELETEBUFFERSARBPROC glDeleteBuffers;
 
 typedef void (_stdcall* PFNGLDRAWARRAYSINSTANCEDPROC) (int mode, int first, int count, int primcount);
@@ -25,8 +26,29 @@ PFNGLVERTEXATTRIBDIVISORPROC glVertexAttribDivisor;
 typedef void (_stdcall* PFNGLVERTEXATTRIBPOINTERARBPROC) (int index, int size, int type, bool normalized, int stride, const void* pointer);
 PFNGLVERTEXATTRIBPOINTERARBPROC glVertexAttribPointer;
 
+typedef void (_stdcall* PFNGLUSEPROGRAMPROC) (int program);
+PFNGLUSEPROGRAMPROC glUseProgram;
+
+typedef int(_stdcall* PFNGLCREATESHADERPROC) (int type);
+PFNGLCREATESHADERPROC glCreateShader;
+
 typedef void (_stdcall* PFNGLSHADERSOURCEPROC) (int shader, int count, const char* const* strings, const int* length);
 PFNGLSHADERSOURCEPROC glShaderSource;
+
+typedef void(_stdcall* PFNGLCOMPILESHADERPROC) (int id);
+PFNGLCOMPILESHADERPROC glCompileShader;
+
+typedef void(_stdcall* PFNGLATTACHSHADERPROC) (int program, int shader);
+PFNGLATTACHSHADERPROC glAttachShader;
+
+typedef void(_stdcall* PFNGLLINKPROGRAMPROC) (int id);
+PFNGLLINKPROGRAMPROC glLinkProgram;
+
+typedef int(_stdcall* PFNGLCREATEPROGRAMPROC) ();
+PFNGLCREATEPROGRAMPROC glCreateProgram;
+
+typedef void (_stdcall * PFNGLBUFFERSUBDATAPROC) (int target, int offset, int size, const void* data);
+PFNGLBUFFERSUBDATAPROC glBufferSubData;
 
 const char* instancedVertexShader = "\n\
 uniform mat4 MatrixP;\n\
@@ -62,15 +84,160 @@ void main()\n\
 #endif\n\
 }\n";
 
-void _stdcall Hook_glShaderSource(int shader, int count, const char* strings[], const int* length) {
-	/*
-	for (int i = 0; i < count; i++) {
-		if (strstr(strings[i], "uniform mat4 MatrixW") != NULL) {
-			strings[i] = instancedVertexShader;
-		}
-	}*/
+static const char* instancedFragmentShader = " \n\
+#if defined( GL_ES ) \n\
+precision mediump float; \n\
+#endif \n\
+ \n\
+uniform sampler2D SAMPLER[4]; \n\
+ \n\
+#ifndef LIGHTING_H \n\
+#define LIGHTING_H \n\
+ \n\
+// Lighting \n\
+varying vec3 PS_POS; \n\
+uniform vec3 AMBIENT; \n\
+ \n\
+// xy = min, zw = max \n\
+uniform vec4 LIGHTMAP_WORLD_EXTENTS; \n\
+ \n\
+#define LIGHTMAP_TEXTURE SAMPLER[3] \n\
+ \n\
+#ifndef LIGHTMAP_TEXTURE \n\
+#error If you use lighting, you must #define the sampler that the lightmap belongs to \n\
+#endif \n\
+ \n\
+vec3 CalculateLightingContribution() { \n\
+	vec2 uv = (PS_POS.xz - LIGHTMAP_WORLD_EXTENTS.xy) * LIGHTMAP_WORLD_EXTENTS.zw; \n\
+ \n\
+	vec3 colour = texture2D(LIGHTMAP_TEXTURE, uv.xy).rgb + AMBIENT.rgb; \n\
+ \n\
+	return clamp(colour.rgb, vec3(0, 0, 0), vec3(1, 1, 1)); \n\
+} \n\
+ \n\
+vec3 CalculateLightingContribution(vec3 normal) { \n\
+	return vec3(1, 1, 1); \n\
+} \n\
+ \n\
+#endif //LIGHTING.h \n\
+ \n\
+ \n\
+varying vec3 PS_TEXCOORD; \n\
+ \n\
+uniform vec4 TINT_ADD; \n\
+uniform vec4 TINT_MULT; \n\
+uniform vec2 PARAMS; \n\
+ \n\
+#define ALPHA_TEST PARAMS.x \n\
+#define LIGHT_OVERRIDE PARAMS.y \n\
+ \n\
+#if defined( FADE_OUT ) \n\
+uniform vec3 EROSION_PARAMS; \n\
+varying vec2 FADE_UV; \n\
+ \n\
+#define ERODE_SAMPLER SAMPLER[2] \n\
+#define EROSION_MIN EROSION_PARAMS.x \n\
+#define EROSION_RANGE EROSION_PARAMS.y \n\
+#define EROSION_LERP EROSION_PARAMS.z \n\
+#endif \n\
+ \n\
+void main() { \n\
+	vec4 colour; \n\
+	if (PS_TEXCOORD.z < 0.5) { \n\
+		colour.rgba = texture2D(SAMPLER[0], PS_TEXCOORD.xy); \n\
+	} else { \n\
+		colour.rgba = texture2D(SAMPLER[1], PS_TEXCOORD.xy); \n\
+	} \n\
+ \n\
+	if (colour.a >= ALPHA_TEST) { \n\
+		gl_FragColor.rgba = colour.rgba; \n\
+		gl_FragColor.rgba *= TINT_MULT.rgba; \n\
+		gl_FragColor.rgb += vec3(TINT_ADD.rgb * colour.a); \n\
+ \n\
+#if defined( FADE_OUT ) \n\
+		float height = texture2D(ERODE_SAMPLER, FADE_UV.xy).a; \n\
+		float erode_val = clamp((height - EROSION_MIN) / EROSION_RANGE, 0.0, 1.0); \n\
+		gl_FragColor.rgba = mix(gl_FragColor.rgba, gl_FragColor.rgba * erode_val, EROSION_LERP); \n\
+#endif \n\
+ \n\
+		vec3 light = CalculateLightingContribution(); \n\
+		gl_FragColor.rgb *= max(light.rgb, vec3(LIGHT_OVERRIDE, LIGHT_OVERRIDE, LIGHT_OVERRIDE)); \n\
+	} else { \n\
+		discard; \n\
+	} \n\
+} \n\
+";
+static bool ReplaceProgram = false;
+#define GL_FRAGMENT_SHADER 0x8B30
+#define GL_VERTEX_SHADER 0x8B31
+#define GL_ARRAY_BUFFER 0x8892
+#define GL_DYNAMIC_DRAW 0x88E8
 
-	glShaderSource(shader, count, strings, length);
+struct Matrix {
+	float value[16];
+};
+
+std::vector<Matrix> instancedBufferData(1024 * 64);
+size_t updatedInstancedBufferCount = 0;
+size_t instancedBufferCount = 0;
+int instancedBuffer = 0;
+bool bufferSizeChanged = false;
+
+void _stdcall Hook_SwapContext() {
+	// finish a frame
+	instancedBufferCount = 0;
+	updatedInstancedBufferCount = 0;
+}
+
+void AddSpirteWorldMatrix(float* data) {
+	if (instancedBufferCount > instancedBufferData.size()) {
+		bufferSizeChanged = true;
+		instancedBufferData.resize(instancedBufferData.size() * 2);
+	}
+
+	memcpy(instancedBufferData[instancedBufferCount].value, data, sizeof(Matrix));
+}
+
+void UpdateWorldMatrices() {
+	if (updatedInstancedBufferCount != instancedBufferCount) {
+		if (instancedBuffer == 0) {
+			glGenBuffers(1, &instancedBuffer);
+			glBindBuffer(GL_ARRAY_BUFFER, instancedBuffer);
+			glBufferData(GL_ARRAY_BUFFER, sizeof(Matrix) * instancedBufferData.size(), nullptr, GL_DYNAMIC_DRAW);
+		} else {
+			glBindBuffer(GL_ARRAY_BUFFER, instancedBuffer);
+			if (bufferSizeChanged) {
+				glBufferData(GL_ARRAY_BUFFER, sizeof(Matrix) * instancedBufferData.size(), &instancedBufferData[0], GL_DYNAMIC_DRAW);
+				bufferSizeChanged = false;
+			} else {
+				glBufferSubData(GL_ARRAY_BUFFER, updatedInstancedBufferCount * sizeof(Matrix), (instancedBufferCount - updatedInstancedBufferCount) * sizeof(Matrix), &instancedBufferData[0]);
+			}
+		}
+
+		updatedInstancedBufferCount = instancedBufferCount;
+	}
+}
+
+void _stdcall Hook_glUseProgram(int program) {
+	if (ReplaceProgram) {
+		static int instancedProgram = 0;
+		if (instancedProgram == 0) {
+			instancedProgram = glCreateProgram();
+			int vs = glCreateShader(GL_VERTEX_SHADER);
+			glShaderSource(vs, 1, &instancedVertexShader, nullptr);
+			glCompileShader(vs);
+			int fs = glCreateShader(GL_FRAGMENT_SHADER);
+			glShaderSource(fs, 1, &instancedFragmentShader, nullptr);
+			glCompileShader(fs);
+			glAttachShader(instancedProgram, vs);
+			glAttachShader(instancedProgram, fs);
+			glLinkProgram(instancedProgram);
+		}
+
+		glUseProgram(instancedProgram);
+	} else {
+		glUseProgram(program);
+	}
 }
 
 struct Object {
@@ -85,8 +252,8 @@ struct GLContext {
 
 		HMODULE hModule = GetModuleHandleA(NULL);
 		// Hook DrawArraysSprite
-		const char startCode[] = { 0x56, 0x8B, 0xF1, 0x8B, 0x06, 0x8B, 0x50, 0x08, 0x57, 0xFF, 0xD2, 0x8B, 0x44, 0x24, 0x0C, 0x50, 0x6A, 0x04, 0x8B, 0xCE, 0xE8 };
-		const char endCode[] = { 0x5F, 0x5E, 0xC2, 0x10, 0x00 };
+		const unsigned char startCode[] = { 0x56, 0x8B, 0xF1, 0x8B, 0x06, 0x8B, 0x50, 0x08, 0x57, 0xFF, 0xD2, 0x8B, 0x44, 0x24, 0x0C, 0x50, 0x6A, 0x04, 0x8B, 0xCE, 0xE8 };
+		const unsigned char endCode[] = { 0x5F, 0x5E, 0xC2, 0x10, 0x00 };
 		IMAGE_NT_HEADERS* header = ::ImageNtHeader(hModule);
 
 		for (BYTE* p = (BYTE*)hModule + header->OptionalHeader.BaseOfCode; p < (BYTE*)hModule + header->OptionalHeader.BaseOfCode + header->OptionalHeader.SizeOfCode - 0x200; p += 16) {
@@ -100,7 +267,7 @@ struct GLContext {
 
 				if (match) {
 					// Match!
-					char jmpCode[5] = { 0xe9, 0, 0, 0, 0 };
+					unsigned char jmpCode[5] = { 0xe9, 0, 0, 0, 0 };
 					DWORD oldProtect;
 					::VirtualProtect(p, 5, PAGE_EXECUTE_READWRITE, &oldProtect);
 					*(DWORD*)(jmpCode + 1) = (DWORD)&GLContext::DrawArraysSprite - 5 - (DWORD)p;
@@ -118,7 +285,14 @@ struct GLContext {
 		glDrawArraysInstanced = (PFNGLDRAWARRAYSINSTANCEDPROC)GetProcAddress(glModule, "glDrawArraysInstanced");
 		glVertexAttribDivisor = (PFNGLVERTEXATTRIBDIVISORPROC)GetProcAddress(glModule, "glVertexAttribDivisor");
 		glVertexAttribPointer = (PFNGLVERTEXATTRIBPOINTERARBPROC)GetProcAddress(glModule, "glVertexAttribPointer");
+		glCreateProgram = (PFNGLCREATEPROGRAMPROC)GetProcAddress(glModule, "glCreateProgram");
+		glUseProgram = (PFNGLUSEPROGRAMPROC)GetProcAddress(glModule, "glUseProgram");
+		glCreateShader = (PFNGLCREATESHADERPROC)GetProcAddress(glModule, "glCreateShader");
 		glShaderSource = (PFNGLSHADERSOURCEPROC)GetProcAddress(glModule, "glShaderSource");
+		glCompileShader = (PFNGLCOMPILESHADERPROC)GetProcAddress(glModule, "glCompileShader");
+		glAttachShader = (PFNGLATTACHSHADERPROC)GetProcAddress(glModule, "glAttachShader");
+		glLinkProgram = (PFNGLLINKPROGRAMPROC)GetProcAddress(glModule, "glLinkProgram");
+		glBufferSubData = (PFNGLBUFFERSUBDATAPROC)GetProcAddress(glModule, "glBufferSubData");
 
 		ULONG size;
 
@@ -129,11 +303,11 @@ struct GLContext {
 				for (PIMAGE_THUNK_DATA thunk = (PIMAGE_THUNK_DATA)(desc->FirstThunk + (DWORD)hModule); thunk->u1.Function != 0; thunk++)
 				{
 					void** p = (void**)thunk->u1.Function;
-					if (*p == glShaderSource)
+					if (*p == glUseProgram)
 					{
 						DWORD oldProtect;
 						::VirtualProtect(p, sizeof(DWORD), PAGE_READWRITE, &oldProtect);
-						*p = Hook_glShaderSource;
+						*p = Hook_glUseProgram;
 						::VirtualProtect(p, sizeof(DWORD), oldProtect, 0);
 
 						return;
@@ -147,10 +321,15 @@ struct GLContext {
 	{
 		GLContext* _this;
 		_asm mov _this, ecx;
+		ReplaceProgram = true;
 
 		typedef void (GLContext::*PFNSETMATERIAL)();
 		PFNSETMATERIAL SetMaterial = *(PFNSETMATERIAL*)(*(const char**)_this + 8); // 2nd virtual function of Context
-		//(_this->*SetMaterial)();
+		(_this->*SetMaterial)();
+
+		// Set instanced buffers
+
+		ReplaceProgram = false;
 	}
 } context;
 

@@ -1,6 +1,8 @@
 #include <Windows.h>
 #include <dbghelp.h>
 #include <vector>
+#include <unordered_map>
+#include <cassert>
 #pragma comment(lib, "dbghelp.lib")
 
 #pragma region OpenGL
@@ -50,132 +52,15 @@ PFNGLCREATEPROGRAMPROC glCreateProgram;
 typedef void (_stdcall * PFNGLBUFFERSUBDATAPROC) (int target, int offset, int size, const void* data);
 PFNGLBUFFERSUBDATAPROC glBufferSubData;
 
-
 typedef void (_stdcall * PFNGLDRAWARRAYSPROC) (int, int, int);
 PFNGLDRAWARRAYSPROC glDrawArrays;
 
-const char* instancedVertexShader = "\n\
-uniform mat4 MatrixP;\n\
-uniform mat4 MatrixV;\n\
-attribute mat4 MatrixW;\n\
-attribute vec3 POSITION;\n\
-attribute vec3 TEXCOORD0;\n\
-varying vec3 PS_TEXCOORD;\n\
-varying vec3 PS_POS;\n\
-#if defined( FADE_OUT )\n\
-uniform mat4 STATIC_WORLD_MATRIX;\n\
-varying vec2 FADE_UV;\n\
-#endif\n\
-\n\
-void main()\n\
-{\n\
-	mat4 mtxPVW = MatrixP * MatrixV * MatrixW;\n\
-	gl_Position = mtxPVW * vec4(POSITION.xyz, 1.0);\n\
-\n\
-	vec4 world_pos = MatrixW * vec4(POSITION.xyz, 1.0);\n\
-\n\
-	PS_TEXCOORD = TEXCOORD0;\n\
-	PS_POS = world_pos.xyz;\n\
-\n\
-#if defined( FADE_OUT )\n\
-	vec4 static_world_pos = STATIC_WORLD_MATRIX * vec4(POSITION.xyz, 1.0);\n\
-	vec3 forward = normalize(vec3(MatrixV[2][0], 0.0, MatrixV[2][2]));\n\
-	float d = dot(static_world_pos.xyz, forward);\n\
-	vec3 pos = static_world_pos.xyz + (forward * -d);\n\
-	vec3 left = cross(forward, vec3(0.0, 1.0, 0.0));\n\
-\n\
-	FADE_UV = vec2(dot(pos, left) / 4.0, static_world_pos.y / 8.0);\n\
-#endif\n\
-}\n";
-
-static const char* instancedFragmentShader = " \n\
-#if defined( GL_ES ) \n\
-precision mediump float; \n\
-#endif \n\
- \n\
-uniform sampler2D SAMPLER[4]; \n\
- \n\
-#ifndef LIGHTING_H \n\
-#define LIGHTING_H \n\
- \n\
-// Lighting \n\
-varying vec3 PS_POS; \n\
-uniform vec3 AMBIENT; \n\
- \n\
-// xy = min, zw = max \n\
-uniform vec4 LIGHTMAP_WORLD_EXTENTS; \n\
- \n\
-#define LIGHTMAP_TEXTURE SAMPLER[3] \n\
- \n\
-#ifndef LIGHTMAP_TEXTURE \n\
-#error If you use lighting, you must #define the sampler that the lightmap belongs to \n\
-#endif \n\
- \n\
-vec3 CalculateLightingContribution() { \n\
-	vec2 uv = (PS_POS.xz - LIGHTMAP_WORLD_EXTENTS.xy) * LIGHTMAP_WORLD_EXTENTS.zw; \n\
- \n\
-	vec3 colour = texture2D(LIGHTMAP_TEXTURE, uv.xy).rgb + AMBIENT.rgb; \n\
- \n\
-	return clamp(colour.rgb, vec3(0, 0, 0), vec3(1, 1, 1)); \n\
-} \n\
- \n\
-vec3 CalculateLightingContribution(vec3 normal) { \n\
-	return vec3(1, 1, 1); \n\
-} \n\
- \n\
-#endif //LIGHTING.h \n\
- \n\
- \n\
-varying vec3 PS_TEXCOORD; \n\
- \n\
-uniform vec4 TINT_ADD; \n\
-uniform vec4 TINT_MULT; \n\
-uniform vec2 PARAMS; \n\
- \n\
-#define ALPHA_TEST PARAMS.x \n\
-#define LIGHT_OVERRIDE PARAMS.y \n\
- \n\
-#if defined( FADE_OUT ) \n\
-uniform vec3 EROSION_PARAMS; \n\
-varying vec2 FADE_UV; \n\
- \n\
-#define ERODE_SAMPLER SAMPLER[2] \n\
-#define EROSION_MIN EROSION_PARAMS.x \n\
-#define EROSION_RANGE EROSION_PARAMS.y \n\
-#define EROSION_LERP EROSION_PARAMS.z \n\
-#endif \n\
- \n\
-void main() { \n\
-	vec4 colour; \n\
-	if (PS_TEXCOORD.z < 0.5) { \n\
-		colour.rgba = texture2D(SAMPLER[0], PS_TEXCOORD.xy); \n\
-	} else { \n\
-		colour.rgba = texture2D(SAMPLER[1], PS_TEXCOORD.xy); \n\
-	} \n\
- \n\
-	if (colour.a >= ALPHA_TEST) { \n\
-		gl_FragColor.rgba = colour.rgba; \n\
-		gl_FragColor.rgba *= TINT_MULT.rgba; \n\
-		gl_FragColor.rgb += vec3(TINT_ADD.rgb * colour.a); \n\
- \n\
-#if defined( FADE_OUT ) \n\
-		float height = texture2D(ERODE_SAMPLER, FADE_UV.xy).a; \n\
-		float erode_val = clamp((height - EROSION_MIN) / EROSION_RANGE, 0.0, 1.0); \n\
-		gl_FragColor.rgba = mix(gl_FragColor.rgba, gl_FragColor.rgba * erode_val, EROSION_LERP); \n\
-#endif \n\
- \n\
-		vec3 light = CalculateLightingContribution(); \n\
-		gl_FragColor.rgb *= max(light.rgb, vec3(LIGHT_OVERRIDE, LIGHT_OVERRIDE, LIGHT_OVERRIDE)); \n\
-	} else { \n\
-		discard; \n\
-	} \n\
-} \n\
-";
 static bool ReplaceProgram = false;
 #define GL_FRAGMENT_SHADER 0x8B30
 #define GL_VERTEX_SHADER 0x8B31
 #define GL_ARRAY_BUFFER 0x8892
 #define GL_DYNAMIC_DRAW 0x88E8
+#define GL_ARRAY_BUFFER 0x8892
 
 struct Matrix {
 	float value[16];
@@ -222,31 +107,72 @@ void UpdateWorldMatrices() {
 	}
 }
 
+struct ShaderInfo {
+	int type;
+	std::string code;
+};
+
+std::tr1::unordered_map<int, ShaderInfo> mapShaderToInfo;
+
+struct ProgramInfo {
+	int vs;
+	int fs;
+	int ivs;
+	int ip;
+};
+
+std::tr1::unordered_map<int, ProgramInfo> mapProgramToInfo;
+
+int _stdcall Hook_glCreateShader(int type) {
+	int shader = glCreateShader(type);
+	mapShaderToInfo[shader].type = type;
+	assert(type == GL_VERTEX_SHADER || type == GL_FRAGMENT_SHADER);
+	return shader;
+}
+
+void _stdcall Hook_glShaderSource(int shader, int count, const char* strings[], int* v) {
+	assert(count == 1);
+	mapShaderToInfo[shader].code = strings[0];
+	glShaderSource(shader, count, strings, v);
+}
+
+void _stdcall Hook_glAttachShader(int program, int shader) {
+	ProgramInfo& info = mapProgramToInfo[program];
+	assert(mapShaderToInfo[shader].type == GL_VERTEX_SHADER || mapShaderToInfo[shader].type == GL_FRAGMENT_SHADER);
+	if (mapShaderToInfo[shader].type == GL_VERTEX_SHADER) {
+		info.vs = shader;
+	} else {
+		info.fs = shader;
+	}
+
+	glAttachShader(program, shader);
+}
+
+void _stdcall Hook_glLinkProgram(int program) {
+	ProgramInfo& info = mapProgramToInfo[program];
+	glLinkProgram(program);
+
+	info.ip = glCreateProgram();
+	info.ivs = glCreateShader(GL_VERTEX_SHADER);
+	ShaderInfo& sinfo = mapShaderToInfo[info.vs];
+	const char* source[] = { sinfo.code.c_str() };
+	glShaderSource(info.ivs, 1, source, NULL);
+	glCompileShader(info.ivs);
+	glAttachShader(info.ip, info.ivs);
+	glAttachShader(info.ip, info.fs);
+
+	glLinkProgram(info.ip);
+}
+
 void _stdcall Hook_glUseProgram(int program) {
 	if (ReplaceProgram) {
-		static int instancedProgram = 0;
-		if (instancedProgram == 0) {
-			instancedProgram = glCreateProgram();
-			int vs = glCreateShader(GL_VERTEX_SHADER);
-			glShaderSource(vs, 1, &instancedVertexShader, NULL);
-			glCompileShader(vs);
-			int fs = glCreateShader(GL_FRAGMENT_SHADER);
-			glShaderSource(fs, 1, &instancedFragmentShader, NULL);
-			glCompileShader(fs);
-			glAttachShader(instancedProgram, vs);
-			glAttachShader(instancedProgram, fs);
-			glLinkProgram(instancedProgram);
-		}
-
-		glUseProgram(instancedProgram);
+		glUseProgram(mapProgramToInfo[program].ip);
 	} else {
 		glUseProgram(program);
 	}
 }
 
-struct Object {
-
-};
+struct Object {};
 
 template <class D, class T>
 D ForceCast(T t) {
@@ -297,20 +223,31 @@ struct GLContext {
 	void SetupGLHooks(HMODULE hModule, HMODULE glModule) {
 		ULONG size;
 
+		void* addresses[] = {
+			glUseProgram, Hook_glUseProgram,
+			glCreateShader, Hook_glCreateShader,
+			glShaderSource, Hook_glShaderSource,
+			glAttachShader, Hook_glAttachShader,
+			glLinkProgram, Hook_glLinkProgram,
+		};
+
+		size_t count = 0;
 		for (PIMAGE_IMPORT_DESCRIPTOR desc = (PIMAGE_IMPORT_DESCRIPTOR)::ImageDirectoryEntryToData(hModule, TRUE,
 			IMAGE_DIRECTORY_ENTRY_IMPORT, &size); desc->Name != 0; desc++) {
 			LPSTR pszMod = (LPSTR)((DWORD)hModule + desc->Name);
 			if (_stricmp(pszMod, "libglesv2.dll") == 0) {
 				for (PIMAGE_THUNK_DATA thunk = (PIMAGE_THUNK_DATA)(desc->FirstThunk + (DWORD)hModule); thunk->u1.Function != 0; thunk++) {
-					void** p = (void**)thunk->u1.Function;
-					if (*p == glUseProgram)
-					{
-						DWORD oldProtect;
-						::VirtualProtect(p, sizeof(DWORD), PAGE_READWRITE, &oldProtect);
-					//	*p = Hook_glUseProgram;
-						::VirtualProtect(p, sizeof(DWORD), oldProtect, 0);
-
-						return;
+					void*& p = (void*&)thunk->u1.Function;
+					for (size_t i = 0; i < sizeof(addresses) / sizeof(addresses[0]); i += 2) {
+						if (p == addresses[i]) {
+							DWORD oldProtect;
+							::VirtualProtect(&p, sizeof(DWORD), PAGE_EXECUTE_READWRITE, &oldProtect);
+							p = addresses[i + 1];
+							::VirtualProtect(&p, sizeof(DWORD), oldProtect, 0);
+							if (++count == sizeof(addresses) / sizeof(addresses[0]) / 2) {
+								return;
+							}
+						}
 					}
 				}
 			}
@@ -390,7 +327,7 @@ void _stdcall DrawArraysSpriteImpl(Object* object, int first, int count, int pri
 	SetMaterial(buffer, *(DWORD*)(_this + 420), (const char*)_this + 16);
 
 	if (*(DWORD *)(_this + 32) != -1) {
-		glBindBuffer(34963, 0);
+		glBindBuffer(GL_ARRAY_BUFFER, 0);
 		*(DWORD *)(_this + 32) = -1;
 	}
 

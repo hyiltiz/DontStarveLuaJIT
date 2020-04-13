@@ -259,17 +259,19 @@ D ForceCast(T t) {
 	return p.d;
 }
 
+void DrawArraysSprite();
+
 struct GLContext {
-	typedef void (_stdcall *PFNPREPAREVERTEXBUFFER)(int, Object*);
+	typedef void (__thiscall *PFNPREPAREVERTEXBUFFER)(void*, int, Object*);
 	static PFNPREPAREVERTEXBUFFER PrepareVertexBuffer;
 
-	typedef void (_stdcall *PFNBINDVERTEXBUFFER)();
+	typedef void (__thiscall *PFNBINDVERTEXBUFFER)(void*);
 	static PFNBINDVERTEXBUFFER BindVertexBuffer;
 
-	typedef const char* (*PFNGETBUFFER)(void*, DWORD);
+	typedef void* (__thiscall *PFNGETBUFFER)(void*, DWORD);
 	static PFNGETBUFFER GetBuffer;
 	
-	typedef void (*PFNFREE)(int);
+	typedef void (__thiscall *PFNFREE)(void*, int);
 	static PFNFREE Free;
 
 
@@ -305,7 +307,7 @@ struct GLContext {
 					{
 						DWORD oldProtect;
 						::VirtualProtect(p, sizeof(DWORD), PAGE_READWRITE, &oldProtect);
-						*p = Hook_glUseProgram;
+					//	*p = Hook_glUseProgram;
 						::VirtualProtect(p, sizeof(DWORD), oldProtect, 0);
 
 						return;
@@ -346,7 +348,7 @@ struct GLContext {
 						unsigned char jmpCode[5] = { 0xe9, 0, 0, 0, 0 };
 						DWORD oldProtect;
 						::VirtualProtect(p, 5, PAGE_EXECUTE_READWRITE, &oldProtect);
-						*(DWORD*)(jmpCode + 1) = (DWORD)&GLContext::DrawArraysSprite - 5 - (DWORD)p;
+						*(DWORD*)(jmpCode + 1) = (DWORD)&DrawArraysSprite - 5 - (DWORD)p;
 						memcpy(p, jmpCode, 5);
 						::VirtualProtect(p, 5, oldProtect, &oldProtect);
 						return;
@@ -368,45 +370,41 @@ struct GLContext {
 		GetGLAddresses(glModule);
 		SetupGLHooks(hModule, glModule);
 		SetupClientHooks(hModule);
-
-	}
-
-	static void _stdcall DrawArraysSprite(Object* object, int first, int count, int primType)
-	{
-		GLContext* _this;
-		_asm mov _this, ecx;
-		ReplaceProgram = true;
-
-		typedef void (_stdcall *PFNBINDMATERIAL)();
-		PFNBINDMATERIAL BindMaterial = ForceCast<PFNBINDMATERIAL>(*(DWORD*)(*(const char**)_this + 8)); // 2nd virtual function of Context
-		
-		_asm mov ecx, _this;
-		BindMaterial();
-
-		_asm mov ecx, _this;
-		PrepareVertexBuffer(4, object);
-
-		_asm mov ecx, _this;
-		const char* buffer = GetBuffer(*(void**)((char*)_this + 444), *(DWORD*)((char*)_this + 44));
-
-		typedef void (_stdcall *PFNSETMATERIAL)(DWORD, const char*);
-		PFNSETMATERIAL SetMaterial = ForceCast<PFNSETMATERIAL>(*(DWORD*)(*(DWORD*)buffer + 8));
-
-		_asm mov ecx, _this;
-		SetMaterial(*(DWORD*)(_this + 420), (const char*)_this + 16);
-
-		if (*(DWORD *)(_this + 32) != -1) {
-			glBindBuffer(34963, 0);
-			*(DWORD *)(_this + 32) = -1;
-		}
-
-		glDrawArrays(0x0004, first, count);
-
-		_asm mov ecx, _this;
-		Free(4);
-		ReplaceProgram = false;
 	}
 } context;
+
+GLContext* _this;
+void _stdcall DrawArraysSpriteImpl(Object* object, int first, int count, int primType) {
+	ReplaceProgram = true;
+
+	typedef void(__thiscall *PFNBINDMATERIAL)(void*);
+	PFNBINDMATERIAL BindMaterial = ForceCast<PFNBINDMATERIAL>(*(DWORD*)(*(const char**)_this + 8)); // 2nd virtual function of Context
+
+	BindMaterial(_this);
+	GLContext::PrepareVertexBuffer(_this, 4, object);
+	GLContext::BindVertexBuffer(_this);
+	void* buffer = GLContext::GetBuffer(*(void**)((char*)_this + 444), *(DWORD*)((char*)_this + 44));
+
+	typedef void(__thiscall *PFNSETMATERIAL)(void*, DWORD, const char*);
+	PFNSETMATERIAL SetMaterial = ForceCast<PFNSETMATERIAL>(*(DWORD*)(*(DWORD*)buffer + 8));
+	SetMaterial(buffer, *(DWORD*)(_this + 420), (const char*)_this + 16);
+
+	if (*(DWORD *)(_this + 32) != -1) {
+		glBindBuffer(34963, 0);
+		*(DWORD *)(_this + 32) = -1;
+	}
+
+	static int types[] = { 0, 3, 2, 1, 5, 6, 4, 3, 0 };
+	glDrawArrays(types[primType], first, count);
+
+	GLContext::Free(_this, 4);
+	ReplaceProgram = false;
+}
+
+__declspec(naked)void DrawArraysSprite() {
+	_asm mov _this, ecx;
+	_asm jmp DrawArraysSpriteImpl;
+}
 
 GLContext::PFNPREPAREVERTEXBUFFER GLContext::PrepareVertexBuffer = NULL;
 GLContext::PFNBINDVERTEXBUFFER GLContext::BindVertexBuffer = NULL;

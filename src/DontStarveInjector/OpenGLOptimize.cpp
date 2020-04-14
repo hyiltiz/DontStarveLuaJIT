@@ -89,7 +89,7 @@ static void _stdcall Hook_eglSwapBuffers(int display, int surface) {
 	eglSwapBuffers(display, surface);
 }
 
-static void AddSpirteWorldMatrix(float* data) {
+static void AddSpriteWorldMatrix(float* data) {
 	if (instancedBufferCount > instancedBufferData.size()) {
 		bufferSizeChanged = true;
 		instancedBufferData.resize(instancedBufferData.size() * 2);
@@ -131,7 +131,7 @@ struct ProgramInfo {
 	int ivs;
 	int ip;
 	int slot;
-};
+} *currentProgram;
 
 std::tr1::unordered_map<int, ProgramInfo> mapProgramToInfo;
 
@@ -164,29 +164,46 @@ void _stdcall Hook_glLinkProgram(int program) {
 	ProgramInfo& info = mapProgramToInfo[program];
 	glLinkProgram(program);
 
-	info.ip = glCreateProgram();
-	info.ivs = glCreateShader(GL_VERTEX_SHADER);
 	ShaderInfo& sinfo = mapShaderToInfo[info.vs];
-	const char* source[] = { sinfo.code.c_str() };
-	glShaderSource(info.ivs, 1, source, NULL);
-	glCompileShader(info.ivs);
-	glAttachShader(info.ip, info.ivs);
-	glAttachShader(info.ip, info.fs);
+	size_t offset;
+	static const std::string text = "uniform matrix MatrixW;\n";
+	if ((offset = sinfo.code.find(text)) != std::string::npos) {
+		std::string code = sinfo.code.substr(0, offset);
+		code += "attribute matrix MatrixW;\n";
+		code += sinfo.code.substr(offset + text.length());
 
-	glLinkProgram(info.ip);
-	info.slot = glGetAttribLocation(info.ip, "MatrixW");
+		info.ip = glCreateProgram();
+		info.ivs = glCreateShader(GL_VERTEX_SHADER);
+		const char* source[] = { code.c_str() };
+		glShaderSource(info.ivs, 1, source, NULL);
+		glCompileShader(info.ivs);
+		glAttachShader(info.ip, info.ivs);
+		glAttachShader(info.ip, info.fs);
+
+		glLinkProgram(info.ip);
+		info.slot = glGetAttribLocation(info.ip, "MatrixW");
+	} else {
+		info.ip = 0;
+	}
 }
 
 void _stdcall Hook_glUseProgram(int program) {
 	if (ReplaceProgram) {
-		glUseProgram(mapProgramToInfo[program].ip);
+		ProgramInfo* info = &mapProgramToInfo[program];
+		if (info->ip != 0) {
+			currentProgram = info;
+			glUseProgram(currentProgram->ip);
+		} else {
+			currentProgram = NULL;
+			glUseProgram(program);
+		}
 	} else {
 		glUseProgram(program);
 	}
 }
 
-static void BindWorldMatrices(int program, int offset) {
-	int slot = mapProgramToInfo[program].slot;
+static void BindWorldMatrices(int offset) {
+	int slot = currentProgram->slot;
 	glEnableVertexAttribArray(slot);
 	glBindBuffer(GL_ARRAY_BUFFER, instancedBuffer);
 	for (int i = 0; i < 4; i++) {
@@ -195,7 +212,9 @@ static void BindWorldMatrices(int program, int offset) {
 	glVertexAttribDivisor(slot, 1);
 }
 
-struct Object {};
+struct Object {
+	float worldTransform[16];
+};
 
 template <class D, class T>
 D ForceCast(T t) {
@@ -212,7 +231,7 @@ void DrawArraysSprite();
 
 struct GLContext {
 	typedef void (__thiscall *PFNPREPAREVERTEXBUFFER)(void*, int, Object*);
-	static PFNPREPAREVERTEXBUFFER PrepareVertexBuffer;
+	static PFNPREPAREVERTEXBUFFER PrepareMatrixTransposed;
 
 	typedef void (__thiscall *PFNBINDVERTEXBUFFER)(void*);
 	static PFNBINDVERTEXBUFFER BindVertexBuffer;
@@ -294,7 +313,7 @@ struct GLContext {
 					if (memcmp(q, endCode, sizeof(endCode)) == 0) {
 						// search for necessary functions
 						if (p[0x14] == 0xe8) {
-							PrepareVertexBuffer = ForceCast<PFNPREPAREVERTEXBUFFER>(*(DWORD*)&p[0x15] + (DWORD)p + 5 + 0x14);
+							PrepareMatrixTransposed = ForceCast<PFNPREPAREVERTEXBUFFER>(*(DWORD*)&p[0x15] + (DWORD)p + 5 + 0x14);
 						}
 
 						if (p[0x1B] == 0xe8) {
@@ -349,7 +368,15 @@ void _stdcall DrawArraysSpriteImpl(Object* object, int first, int count, int pri
 	PFNBINDMATERIAL BindMaterial = ForceCast<PFNBINDMATERIAL>(*(DWORD*)(*(const char**)_this + 8)); // 2nd virtual function of Context
 
 	BindMaterial(_this);
-	GLContext::PrepareVertexBuffer(_this, 4, object);
+
+	if (currentProgram != NULL) {
+		size_t current = updatedInstancedBufferCount;
+		AddSpriteWorldMatrix(object->worldTransform);
+		UpdateWorldMatrices();
+		BindWorldMatrices(current);
+	}
+
+	GLContext::PrepareMatrixTransposed(_this, 4, object);
 	GLContext::BindVertexBuffer(_this);
 	void* buffer = GLContext::GetBuffer(*(void**)((char*)_this + 444), *(DWORD*)((char*)_this + 44));
 
@@ -363,7 +390,11 @@ void _stdcall DrawArraysSpriteImpl(Object* object, int first, int count, int pri
 	}
 
 	static int types[] = { 0, 3, 2, 1, 5, 6, 4, 3, 0 };
-	glDrawArrays(types[primType], first, count);
+	if (currentProgram != NULL) {
+		glDrawArraysInstanced(types[primType], first, count, 1);
+	} else {
+		glDrawArrays(types[primType], first, count);
+	}
 
 	GLContext::Free(_this, 4);
 	ReplaceProgram = false;
@@ -374,7 +405,7 @@ __declspec(naked)void DrawArraysSprite() {
 	_asm jmp DrawArraysSpriteImpl;
 }
 
-GLContext::PFNPREPAREVERTEXBUFFER GLContext::PrepareVertexBuffer = NULL;
+GLContext::PFNPREPAREVERTEXBUFFER GLContext::PrepareMatrixTransposed = NULL;
 GLContext::PFNBINDVERTEXBUFFER GLContext::BindVertexBuffer = NULL;
 GLContext::PFNGETBUFFER GLContext::GetBuffer = NULL;
 GLContext::PFNFREE GLContext::Free = NULL;

@@ -209,7 +209,7 @@ void _stdcall Hook_glLinkProgram(int program) {
 	if (sinfo.code.find("mat4 mtxPVW = MatrixP * MatrixV * MatrixW;") != std::string::npos) {
 		std::string code = replace(sinfo.code, "void main", "attribute vec4 instanced; void main");
 		code = replace(code, "mat4 mtxPVW = MatrixP * MatrixV * MatrixW;", "mat4 mtxPVW = MatrixP * MatrixV * MatrixW * mat4(instanced.x, 0, 0, 0, 0, instanced.y, 0, 0, 0, 0, 1, 0, instanced.z, instanced.w, 0, 1);");
-		code = replace(code, "mat4 mat = fastanim_xform", "mat4 mat = fastanim_xform * mat4(instanced.x, 0, 0, 0, 0, instanced.y, 0, 0, 0, 0, 1, 0, instanced.z * 0.0, instanced.w * 0.0, 0, 1)");
+		code = replace(code, "mat4 mat = fastanim_xform", "mat4 mat = fastanim_xform * mat4(1.0 + instanced.x * 0.0001, 0, 0, 0, 0, 1.0 + instanced.y * 0.001, 0, 0, 0, 0, 1, 0, instanced.z * 0.0, instanced.w * 0.0, 0, 1)");
 
 		info.ip = glCreateProgram();
 		info.ivs = glCreateShader(GL_VERTEX_SHADER);
@@ -248,13 +248,15 @@ void _stdcall Hook_glUseProgram(int program) {
 static void BindWorldMatrices(int offset) {
 	int slot = currentProgram->slot;
 	CheckError();
-	glBindBuffer(GL_ARRAY_BUFFER, instancedBuffer);
 	glEnableVertexAttribArray(slot);
+	glBindBuffer(GL_ARRAY_BUFFER, instancedBuffer);
 	CheckError();
 	glVertexAttribPointer(slot, 4, GL_FLOAT, false, 0, (void*)(offset * sizeof(Vector)));
 	CheckError();
 	glVertexAttribDivisor(slot, 1);
+	glBindBuffer(GL_ARRAY_BUFFER, 0);
 	CheckError();
+	// glVertexAttribDivisor(slot, 0);
 }
 
 struct Object {

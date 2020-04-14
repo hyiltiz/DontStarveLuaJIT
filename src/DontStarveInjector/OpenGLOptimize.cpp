@@ -49,11 +49,20 @@ PFNGLLINKPROGRAMPROC glLinkProgram;
 typedef int(_stdcall* PFNGLCREATEPROGRAMPROC) ();
 PFNGLCREATEPROGRAMPROC glCreateProgram;
 
-typedef void (_stdcall * PFNGLBUFFERSUBDATAPROC) (int target, int offset, int size, const void* data);
+typedef void (_stdcall* PFNGLBUFFERSUBDATAPROC) (int target, int offset, int size, const void* data);
 PFNGLBUFFERSUBDATAPROC glBufferSubData;
 
-typedef void (_stdcall * PFNGLDRAWARRAYSPROC) (int, int, int);
+typedef void (_stdcall* PFNGLDRAWARRAYSPROC) (int, int, int);
 PFNGLDRAWARRAYSPROC glDrawArrays;
+
+typedef int(_stdcall* PFNGLGETATTRIBLOCATION)(int program, const char* name);
+PFNGLGETATTRIBLOCATION glGetAttribLocation;
+
+typedef int(_stdcall* PFNGLENABLEVERTEXATTRIBARRAYPROC)(int index);
+PFNGLENABLEVERTEXATTRIBARRAYPROC glEnableVertexAttribArray;
+
+typedef int(_stdcall* PFNEGLSWAPBUFFERSPROC)(int display, int surface);
+PFNEGLSWAPBUFFERSPROC eglSwapBuffers;
 
 static bool ReplaceProgram = false;
 #define GL_FRAGMENT_SHADER 0x8B30
@@ -61,6 +70,7 @@ static bool ReplaceProgram = false;
 #define GL_ARRAY_BUFFER 0x8892
 #define GL_DYNAMIC_DRAW 0x88E8
 #define GL_ARRAY_BUFFER 0x8892
+#define GL_FLOAT        0x1406
 
 struct Matrix {
 	float value[16];
@@ -72,13 +82,14 @@ size_t instancedBufferCount = 0;
 int instancedBuffer = 0;
 bool bufferSizeChanged = false;
 
-void _stdcall Hook_SwapContext() {
+static void _stdcall Hook_eglSwapBuffers(int display, int surface) {
 	// finish a frame
 	instancedBufferCount = 0;
 	updatedInstancedBufferCount = 0;
+	eglSwapBuffers(display, surface);
 }
 
-void AddSpirteWorldMatrix(float* data) {
+static void AddSpirteWorldMatrix(float* data) {
 	if (instancedBufferCount > instancedBufferData.size()) {
 		bufferSizeChanged = true;
 		instancedBufferData.resize(instancedBufferData.size() * 2);
@@ -87,7 +98,7 @@ void AddSpirteWorldMatrix(float* data) {
 	memcpy(instancedBufferData[instancedBufferCount].value, data, sizeof(Matrix));
 }
 
-void UpdateWorldMatrices() {
+static void UpdateWorldMatrices() {
 	if (updatedInstancedBufferCount != instancedBufferCount) {
 		if (instancedBuffer == 0) {
 			glGenBuffers(1, &instancedBuffer);
@@ -119,6 +130,7 @@ struct ProgramInfo {
 	int fs;
 	int ivs;
 	int ip;
+	int slot;
 };
 
 std::tr1::unordered_map<int, ProgramInfo> mapProgramToInfo;
@@ -162,6 +174,7 @@ void _stdcall Hook_glLinkProgram(int program) {
 	glAttachShader(info.ip, info.fs);
 
 	glLinkProgram(info.ip);
+	info.slot = glGetAttribLocation(info.ip, "MatrixW");
 }
 
 void _stdcall Hook_glUseProgram(int program) {
@@ -170,6 +183,16 @@ void _stdcall Hook_glUseProgram(int program) {
 	} else {
 		glUseProgram(program);
 	}
+}
+
+static void BindWorldMatrices(int program, int offset) {
+	int slot = mapProgramToInfo[program].slot;
+	glEnableVertexAttribArray(slot);
+	glBindBuffer(GL_ARRAY_BUFFER, instancedBuffer);
+	for (int i = 0; i < 4; i++) {
+		glVertexAttribPointer(slot + i, 4, GL_FLOAT, false, 0, (void*)(offset * sizeof(Matrix) + i * sizeof(float) * 4));
+	}
+	glVertexAttribDivisor(slot, 1);
 }
 
 struct Object {};
@@ -201,7 +224,7 @@ struct GLContext {
 	static PFNFREE Free;
 
 
-	void GetGLAddresses(HMODULE glModule) {
+	void GetGLAddresses(HMODULE glModule, HMODULE eglModule) {
 		glBindBuffer = (PFNGLBINDBUFFERARBPROC)GetProcAddress(glModule, "glBindBuffer");
 		glBufferData = (PFNGLBUFFERDATAARBPROC)GetProcAddress(glModule, "glBufferData");
 		glGenBuffers = (PFNGLGENBUFFERSARBPROC)GetProcAddress(glModule, "glGenBuffers");
@@ -218,6 +241,10 @@ struct GLContext {
 		glLinkProgram = (PFNGLLINKPROGRAMPROC)GetProcAddress(glModule, "glLinkProgram");
 		glBufferSubData = (PFNGLBUFFERSUBDATAPROC)GetProcAddress(glModule, "glBufferSubData");
 		glDrawArrays = (PFNGLDRAWARRAYSPROC)GetProcAddress(glModule, "glDrawArrays");
+		glGetAttribLocation = (PFNGLGETATTRIBLOCATION)GetProcAddress(glModule, "glGetAttribLocation");
+		glEnableVertexAttribArray = (PFNGLENABLEVERTEXATTRIBARRAYPROC)GetProcAddress(glModule, "glEnableVertexAttribArray");
+
+		eglSwapBuffers = (PFNEGLSWAPBUFFERSPROC)GetProcAddress(eglModule, "eglSwapBuffers");
 	}
 
 	void SetupGLHooks(HMODULE hModule, HMODULE glModule) {
@@ -229,13 +256,14 @@ struct GLContext {
 			glShaderSource, Hook_glShaderSource,
 			glAttachShader, Hook_glAttachShader,
 			glLinkProgram, Hook_glLinkProgram,
+			eglSwapBuffers, Hook_eglSwapBuffers,
 		};
 
 		size_t count = 0;
 		for (PIMAGE_IMPORT_DESCRIPTOR desc = (PIMAGE_IMPORT_DESCRIPTOR)::ImageDirectoryEntryToData(hModule, TRUE,
 			IMAGE_DIRECTORY_ENTRY_IMPORT, &size); desc->Name != 0; desc++) {
 			LPSTR pszMod = (LPSTR)((DWORD)hModule + desc->Name);
-			if (_stricmp(pszMod, "libglesv2.dll") == 0) {
+			if (_stricmp(pszMod, "libglesv2.dll") == 0 || _stricmp(pszMod, "libEGL.dll") == 0) {
 				for (PIMAGE_THUNK_DATA thunk = (PIMAGE_THUNK_DATA)(desc->FirstThunk + (DWORD)hModule); thunk->u1.Function != 0; thunk++) {
 					void*& p = (void*&)thunk->u1.Function;
 					for (size_t i = 0; i < sizeof(addresses) / sizeof(addresses[0]); i += 2) {
@@ -302,9 +330,12 @@ struct GLContext {
 		HMODULE glModule = GetModuleHandleA("libglesv2.dll");
 		if (glModule == NULL)
 			return;
+		HMODULE eglModule = GetModuleHandleA("libEGL.dll");
+		if (eglModule == NULL)
+			return;
 
 		HMODULE hModule = GetModuleHandleA(NULL);
-		GetGLAddresses(glModule);
+		GetGLAddresses(glModule, eglModule);
 		SetupGLHooks(hModule, glModule);
 		SetupClientHooks(hModule);
 	}

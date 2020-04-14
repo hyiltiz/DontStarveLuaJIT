@@ -49,6 +49,9 @@ PFNGLLINKPROGRAMPROC glLinkProgram;
 typedef int(_stdcall* PFNGLCREATEPROGRAMPROC) ();
 PFNGLCREATEPROGRAMPROC glCreateProgram;
 
+typedef void (_stdcall* PFNGLGETSHADERINFOLOGPROC) (int shader, int bufSize, int* length, char* infoLog);
+PFNGLGETSHADERINFOLOGPROC glGetShaderInfoLog;
+
 typedef void (_stdcall* PFNGLBUFFERSUBDATAPROC) (int target, int offset, int size, const void* data);
 PFNGLBUFFERSUBDATAPROC glBufferSubData;
 
@@ -61,6 +64,9 @@ PFNGLGETATTRIBLOCATION glGetAttribLocation;
 typedef int(_stdcall* PFNGLENABLEVERTEXATTRIBARRAYPROC)(int index);
 PFNGLENABLEVERTEXATTRIBARRAYPROC glEnableVertexAttribArray;
 
+typedef int(_stdcall* PFNGLGETERRORPROC)();
+PFNGLGETERRORPROC glGetError;
+
 typedef int(_stdcall* PFNEGLSWAPBUFFERSPROC)(int display, int surface);
 PFNEGLSWAPBUFFERSPROC eglSwapBuffers;
 
@@ -69,18 +75,30 @@ static bool ReplaceProgram = false;
 #define GL_VERTEX_SHADER 0x8B31
 #define GL_ARRAY_BUFFER 0x8892
 #define GL_DYNAMIC_DRAW 0x88E8
-#define GL_ARRAY_BUFFER 0x8892
+#define GL_ELEMENT_ARRAY_BUFFER 0x8893
 #define GL_FLOAT        0x1406
 
 struct Matrix {
-	float value[16];
+	operator float* () {
+		return &value[0][0];
+	}
+
+	float value[4][4];
 };
 
-std::vector<Matrix> instancedBufferData(1024 * 64);
+struct Vector {
+	float value[4];
+};
+
+std::vector<Vector> instancedBufferData(1024 * 64);
 size_t updatedInstancedBufferCount = 0;
 size_t instancedBufferCount = 0;
 int instancedBuffer = 0;
 bool bufferSizeChanged = false;
+
+static void CheckError() {
+	// assert(glGetError() == 0);
+}
 
 static void _stdcall Hook_eglSwapBuffers(int display, int surface) {
 	// finish a frame
@@ -95,25 +113,30 @@ static void AddSpriteWorldMatrix(float* data) {
 		instancedBufferData.resize(instancedBufferData.size() * 2);
 	}
 
-	memcpy(instancedBufferData[instancedBufferCount].value, data, sizeof(Matrix));
+	float* v = (float*)instancedBufferData[instancedBufferCount++].value;
+	v[0] = v[1] = 1.0f;
+	v[2] = data[3];
+	v[3] = data[7];
 }
 
 static void UpdateWorldMatrices() {
 	if (updatedInstancedBufferCount != instancedBufferCount) {
+		CheckError();
 		if (instancedBuffer == 0) {
 			glGenBuffers(1, &instancedBuffer);
 			glBindBuffer(GL_ARRAY_BUFFER, instancedBuffer);
-			glBufferData(GL_ARRAY_BUFFER, sizeof(Matrix) * instancedBufferData.size(), NULL, GL_DYNAMIC_DRAW);
+			glBufferData(GL_ARRAY_BUFFER, sizeof(Vector) * instancedBufferData.size(), &instancedBufferData[0], GL_DYNAMIC_DRAW);
 		} else {
 			glBindBuffer(GL_ARRAY_BUFFER, instancedBuffer);
 			if (bufferSizeChanged) {
-				glBufferData(GL_ARRAY_BUFFER, sizeof(Matrix) * instancedBufferData.size(), &instancedBufferData[0], GL_DYNAMIC_DRAW);
+				glBufferData(GL_ARRAY_BUFFER, sizeof(Vector) * instancedBufferData.size(), &instancedBufferData[0], GL_DYNAMIC_DRAW);
 				bufferSizeChanged = false;
 			} else {
-				glBufferSubData(GL_ARRAY_BUFFER, updatedInstancedBufferCount * sizeof(Matrix), (instancedBufferCount - updatedInstancedBufferCount) * sizeof(Matrix), &instancedBufferData[0]);
+				glBufferSubData(GL_ARRAY_BUFFER, updatedInstancedBufferCount * sizeof(Vector), (instancedBufferCount - updatedInstancedBufferCount) * sizeof(Vector), &instancedBufferData[0]);
 			}
 		}
 
+		CheckError();
 		updatedInstancedBufferCount = instancedBufferCount;
 	}
 }
@@ -160,17 +183,33 @@ void _stdcall Hook_glAttachShader(int program, int shader) {
 	glAttachShader(program, shader);
 }
 
+std::string replace(const std::string& t, const std::string& pattern, const std::string& target) {
+	size_t offset = 0;
+	std::string ret = t;
+	while (true) {
+		size_t position = ret.find(pattern, offset);
+		if (position == std::string::npos) break;
+
+		std::string next = ret.substr(0, position);
+		next += target;
+		next += ret.substr(position + pattern.length());
+		offset = position + target.length();
+		std::swap(ret, next);
+	}
+	
+	return ret;
+}
+
 void _stdcall Hook_glLinkProgram(int program) {
 	ProgramInfo& info = mapProgramToInfo[program];
 	glLinkProgram(program);
 
 	ShaderInfo& sinfo = mapShaderToInfo[info.vs];
-	size_t offset;
-	static const std::string text = "uniform matrix MatrixW;\n";
-	if ((offset = sinfo.code.find(text)) != std::string::npos) {
-		std::string code = sinfo.code.substr(0, offset);
-		code += "attribute matrix MatrixW;\n";
-		code += sinfo.code.substr(offset + text.length());
+
+	if (sinfo.code.find("mat4 mtxPVW = MatrixP * MatrixV * MatrixW;") != std::string::npos) {
+		std::string code = replace(sinfo.code, "void main", "attribute vec4 instanced; void main");
+		code = replace(code, "mat4 mtxPVW = MatrixP * MatrixV * MatrixW;", "mat4 mtxPVW = MatrixP * MatrixV * MatrixW * mat4(instanced.x, 0, 0, 0, 0, instanced.y, 0, 0, 0, 0, 1, 0, instanced.z, instanced.w, 0, 1);");
+		code = replace(code, "mat4 mat = fastanim_xform", "mat4 mat = fastanim_xform * mat4(instanced.x, 0, 0, 0, 0, instanced.y, 0, 0, 0, 0, 1, 0, instanced.z * 0.0, instanced.w * 0.0, 0, 1)");
 
 		info.ip = glCreateProgram();
 		info.ivs = glCreateShader(GL_VERTEX_SHADER);
@@ -179,9 +218,13 @@ void _stdcall Hook_glLinkProgram(int program) {
 		glCompileShader(info.ivs);
 		glAttachShader(info.ip, info.ivs);
 		glAttachShader(info.ip, info.fs);
+		const int MAX_INFO_LOG_SIZE = 4096;
+		char g[MAX_INFO_LOG_SIZE] = { 0 };
+		glGetShaderInfoLog(info.ivs, MAX_INFO_LOG_SIZE - 1, nullptr, g);
 
 		glLinkProgram(info.ip);
-		info.slot = glGetAttribLocation(info.ip, "MatrixW");
+		info.slot = glGetAttribLocation(info.ip, "instanced");
+		assert(info.slot != -1);
 	} else {
 		info.ip = 0;
 	}
@@ -204,16 +247,18 @@ void _stdcall Hook_glUseProgram(int program) {
 
 static void BindWorldMatrices(int offset) {
 	int slot = currentProgram->slot;
-	glEnableVertexAttribArray(slot);
+	CheckError();
 	glBindBuffer(GL_ARRAY_BUFFER, instancedBuffer);
-	for (int i = 0; i < 4; i++) {
-		glVertexAttribPointer(slot + i, 4, GL_FLOAT, false, 0, (void*)(offset * sizeof(Matrix) + i * sizeof(float) * 4));
-	}
+	glEnableVertexAttribArray(slot);
+	CheckError();
+	glVertexAttribPointer(slot, 4, GL_FLOAT, false, 0, (void*)(offset * sizeof(Vector)));
+	CheckError();
 	glVertexAttribDivisor(slot, 1);
+	CheckError();
 }
 
 struct Object {
-	float worldTransform[16];
+	Matrix worldTransform;
 };
 
 template <class D, class T>
@@ -248,20 +293,22 @@ struct GLContext {
 		glBufferData = (PFNGLBUFFERDATAARBPROC)GetProcAddress(glModule, "glBufferData");
 		glGenBuffers = (PFNGLGENBUFFERSARBPROC)GetProcAddress(glModule, "glGenBuffers");
 		glDeleteBuffers = (PFNGLDELETEBUFFERSARBPROC)GetProcAddress(glModule, "glDeleteBuffers");
-		glDrawArraysInstanced = (PFNGLDRAWARRAYSINSTANCEDPROC)GetProcAddress(glModule, "glDrawArraysInstanced");
-		glVertexAttribDivisor = (PFNGLVERTEXATTRIBDIVISORPROC)GetProcAddress(glModule, "glVertexAttribDivisor");
+		glDrawArraysInstanced = (PFNGLDRAWARRAYSINSTANCEDPROC)GetProcAddress(glModule, "glDrawArraysInstancedANGLE");
+		glVertexAttribDivisor = (PFNGLVERTEXATTRIBDIVISORPROC)GetProcAddress(glModule, "glVertexAttribDivisorANGLE");
 		glVertexAttribPointer = (PFNGLVERTEXATTRIBPOINTERARBPROC)GetProcAddress(glModule, "glVertexAttribPointer");
 		glCreateProgram = (PFNGLCREATEPROGRAMPROC)GetProcAddress(glModule, "glCreateProgram");
 		glUseProgram = (PFNGLUSEPROGRAMPROC)GetProcAddress(glModule, "glUseProgram");
 		glCreateShader = (PFNGLCREATESHADERPROC)GetProcAddress(glModule, "glCreateShader");
 		glShaderSource = (PFNGLSHADERSOURCEPROC)GetProcAddress(glModule, "glShaderSource");
 		glCompileShader = (PFNGLCOMPILESHADERPROC)GetProcAddress(glModule, "glCompileShader");
+		glGetShaderInfoLog = (PFNGLGETSHADERINFOLOGPROC)GetProcAddress(glModule, "glGetShaderInfoLog");
 		glAttachShader = (PFNGLATTACHSHADERPROC)GetProcAddress(glModule, "glAttachShader");
 		glLinkProgram = (PFNGLLINKPROGRAMPROC)GetProcAddress(glModule, "glLinkProgram");
 		glBufferSubData = (PFNGLBUFFERSUBDATAPROC)GetProcAddress(glModule, "glBufferSubData");
 		glDrawArrays = (PFNGLDRAWARRAYSPROC)GetProcAddress(glModule, "glDrawArrays");
 		glGetAttribLocation = (PFNGLGETATTRIBLOCATION)GetProcAddress(glModule, "glGetAttribLocation");
 		glEnableVertexAttribArray = (PFNGLENABLEVERTEXATTRIBARRAYPROC)GetProcAddress(glModule, "glEnableVertexAttribArray");
+		glGetError = (PFNGLGETERRORPROC)GetProcAddress(glModule, "glGetError");
 
 		eglSwapBuffers = (PFNEGLSWAPBUFFERSPROC)GetProcAddress(eglModule, "eglSwapBuffers");
 	}
@@ -367,17 +414,25 @@ void _stdcall DrawArraysSpriteImpl(Object* object, int first, int count, int pri
 	typedef void(__thiscall *PFNBINDMATERIAL)(void*);
 	PFNBINDMATERIAL BindMaterial = ForceCast<PFNBINDMATERIAL>(*(DWORD*)(*(const char**)_this + 8)); // 2nd virtual function of Context
 
+	int e = glGetError(); // eat error
 	BindMaterial(_this);
+	CheckError();
 
 	if (currentProgram != NULL) {
 		size_t current = updatedInstancedBufferCount;
+		CheckError();
 		AddSpriteWorldMatrix(object->worldTransform);
+		CheckError();
 		UpdateWorldMatrices();
+		CheckError();
 		BindWorldMatrices(current);
+		CheckError();
 	}
 
 	GLContext::PrepareMatrixTransposed(_this, 4, object);
+		CheckError();
 	GLContext::BindVertexBuffer(_this);
+		CheckError();
 	void* buffer = GLContext::GetBuffer(*(void**)((char*)_this + 444), *(DWORD*)((char*)_this + 44));
 
 	typedef void(__thiscall *PFNSETMATERIAL)(void*, DWORD, const char*);
@@ -385,13 +440,16 @@ void _stdcall DrawArraysSpriteImpl(Object* object, int first, int count, int pri
 	SetMaterial(buffer, *(DWORD*)(_this + 420), (const char*)_this + 16);
 
 	if (*(DWORD *)(_this + 32) != -1) {
-		glBindBuffer(GL_ARRAY_BUFFER, 0);
+		glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
 		*(DWORD *)(_this + 32) = -1;
 	}
 
 	static int types[] = { 0, 3, 2, 1, 5, 6, 4, 3, 0 };
 	if (currentProgram != NULL) {
+		// glDrawArrays(types[primType], first, count);
+		CheckError();
 		glDrawArraysInstanced(types[primType], first, count, 1);
+		CheckError();
 	} else {
 		glDrawArrays(types[primType], first, count);
 	}

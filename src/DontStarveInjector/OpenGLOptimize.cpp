@@ -7,6 +7,12 @@
 
 #pragma region OpenGL
 
+typedef void(_stdcall* PFNGLGENVERTEXARRAYSPROC)(int, int*);
+PFNGLGENVERTEXARRAYSPROC glGenVertexArrays;
+
+typedef void(_stdcall* PFNGLBINDVERTEXARRAYPROC)(int);
+PFNGLBINDVERTEXARRAYPROC glBindVertexArray;
+
 typedef void(_stdcall* PFNGLBINDBUFFERARBPROC)(int target, unsigned int buffer);
 PFNGLBINDBUFFERARBPROC glBindBuffer;
 
@@ -19,22 +25,22 @@ PFNGLGENBUFFERSARBPROC glGenBuffers;
 typedef void(_stdcall* PFNGLDELETEBUFFERSARBPROC)(int n, const int* buffers);
 PFNGLDELETEBUFFERSARBPROC glDeleteBuffers;
 
-typedef void (_stdcall* PFNGLDRAWARRAYSINSTANCEDPROC) (int mode, int first, int count, int primcount);
+typedef void(_stdcall* PFNGLDRAWARRAYSINSTANCEDPROC) (int mode, int first, int count, int primcount);
 PFNGLDRAWARRAYSINSTANCEDPROC glDrawArraysInstanced;
 
-typedef void (_stdcall* PFNGLVERTEXATTRIBDIVISORPROC) (int index, int divisor);
+typedef void(_stdcall* PFNGLVERTEXATTRIBDIVISORPROC) (int index, int divisor);
 PFNGLVERTEXATTRIBDIVISORPROC glVertexAttribDivisor;
 
-typedef void (_stdcall* PFNGLVERTEXATTRIBPOINTERARBPROC) (int index, int size, int type, bool normalized, int stride, const void* pointer);
+typedef void(_stdcall* PFNGLVERTEXATTRIBPOINTERARBPROC) (int index, int size, int type, bool normalized, int stride, const void* pointer);
 PFNGLVERTEXATTRIBPOINTERARBPROC glVertexAttribPointer;
 
-typedef void (_stdcall* PFNGLUSEPROGRAMPROC) (int program);
+typedef void(_stdcall* PFNGLUSEPROGRAMPROC) (int program);
 PFNGLUSEPROGRAMPROC glUseProgram;
 
 typedef int(_stdcall* PFNGLCREATESHADERPROC) (int type);
 PFNGLCREATESHADERPROC glCreateShader;
 
-typedef void (_stdcall* PFNGLSHADERSOURCEPROC) (int shader, int count, const char* const* strings, const int* length);
+typedef void(_stdcall* PFNGLSHADERSOURCEPROC) (int shader, int count, const char* const* strings, const int* length);
 PFNGLSHADERSOURCEPROC glShaderSource;
 
 typedef void(_stdcall* PFNGLCOMPILESHADERPROC) (int id);
@@ -49,13 +55,13 @@ PFNGLLINKPROGRAMPROC glLinkProgram;
 typedef int(_stdcall* PFNGLCREATEPROGRAMPROC) ();
 PFNGLCREATEPROGRAMPROC glCreateProgram;
 
-typedef void (_stdcall* PFNGLGETSHADERINFOLOGPROC) (int shader, int bufSize, int* length, char* infoLog);
+typedef void(_stdcall* PFNGLGETSHADERINFOLOGPROC) (int shader, int bufSize, int* length, char* infoLog);
 PFNGLGETSHADERINFOLOGPROC glGetShaderInfoLog;
 
-typedef void (_stdcall* PFNGLBUFFERSUBDATAPROC) (int target, int offset, int size, const void* data);
+typedef void(_stdcall* PFNGLBUFFERSUBDATAPROC) (int target, int offset, int size, const void* data);
 PFNGLBUFFERSUBDATAPROC glBufferSubData;
 
-typedef void (_stdcall* PFNGLDRAWARRAYSPROC) (int, int, int);
+typedef void(_stdcall* PFNGLDRAWARRAYSPROC) (int, int, int);
 PFNGLDRAWARRAYSPROC glDrawArrays;
 
 typedef int(_stdcall* PFNGLGETATTRIBLOCATION)(int program, const char* name);
@@ -86,18 +92,14 @@ struct Matrix {
 	float value[4][4];
 };
 
-struct Vector {
-	float value[4];
-};
-
-std::vector<Vector> instancedBufferData(1024 * 16);
+std::vector<Matrix> instancedBufferData(1024 * 64);
 size_t updatedInstancedBufferCount = 0;
 size_t instancedBufferCount = 0;
 int instancedBuffer = 0;
 bool bufferSizeChanged = false;
 
 static void CheckError() {
-	// assert(glGetError() == 0);
+	assert(glGetError() == 0);
 }
 
 static void _stdcall Hook_eglSwapBuffers(int display, int surface) {
@@ -114,9 +116,11 @@ static void AddSpriteWorldMatrix(float* data) {
 	}
 
 	float* v = (float*)instancedBufferData[instancedBufferCount++].value;
-	v[0] = v[1] = 1.0f;
-	v[2] = data[3];
-	v[3] = data[7];
+	for (int i = 0; i < 4; i++) {
+		for (int j = 0; j < 4; j++) {
+			v[i * 4 + j] = data[j * 4 + i];
+		}
+	}
 }
 
 static void UpdateWorldMatrices() {
@@ -125,14 +129,14 @@ static void UpdateWorldMatrices() {
 		if (instancedBuffer == 0) {
 			glGenBuffers(1, &instancedBuffer);
 			glBindBuffer(GL_ARRAY_BUFFER, instancedBuffer);
-			glBufferData(GL_ARRAY_BUFFER, sizeof(Vector) * instancedBufferData.size(), &instancedBufferData[0], GL_DYNAMIC_DRAW);
+			glBufferData(GL_ARRAY_BUFFER, sizeof(Matrix) * instancedBufferData.size(), &instancedBufferData[0], GL_DYNAMIC_DRAW);
 		} else {
 			glBindBuffer(GL_ARRAY_BUFFER, instancedBuffer);
 			if (bufferSizeChanged) {
-				glBufferData(GL_ARRAY_BUFFER, sizeof(Vector) * instancedBufferData.size(), &instancedBufferData[0], GL_DYNAMIC_DRAW);
+				glBufferData(GL_ARRAY_BUFFER, sizeof(Matrix) * instancedBufferData.size(), &instancedBufferData[0], GL_DYNAMIC_DRAW);
 				bufferSizeChanged = false;
 			} else {
-				glBufferSubData(GL_ARRAY_BUFFER, updatedInstancedBufferCount * sizeof(Vector), (instancedBufferCount - updatedInstancedBufferCount) * sizeof(Vector), &instancedBufferData[0]);
+				glBufferSubData(GL_ARRAY_BUFFER, updatedInstancedBufferCount * sizeof(Matrix), (instancedBufferCount - updatedInstancedBufferCount) * sizeof(Matrix), &instancedBufferData[updatedInstancedBufferCount]);
 			}
 		}
 
@@ -154,6 +158,7 @@ struct ProgramInfo {
 	int ivs;
 	int ip;
 	int slot;
+	int vao;
 } *currentProgram;
 
 std::tr1::unordered_map<int, ProgramInfo> mapProgramToInfo;
@@ -196,7 +201,7 @@ std::string replace(const std::string& t, const std::string& pattern, const std:
 		offset = position + target.length();
 		std::swap(ret, next);
 	}
-	
+
 	return ret;
 }
 
@@ -207,9 +212,11 @@ void _stdcall Hook_glLinkProgram(int program) {
 	ShaderInfo& sinfo = mapShaderToInfo[info.vs];
 
 	if (sinfo.code.find("mat4 mtxPVW = MatrixP * MatrixV * MatrixW;") != std::string::npos) {
-		std::string code = replace(sinfo.code, "void main", "attribute vec4 instanced; void main");
-		code = replace(code, "mat4 mtxPVW = MatrixP * MatrixV * MatrixW;", "mat4 mtxPVW = MatrixP * MatrixV * mat4(instanced.x, 0, 0, 0, 0, instanced.y, 0, 0, 0, 0, 1, 0, instanced.z, instanced.w, 0, 1);");
-		code = replace(code, "mat4 mat = fastanim_xform", "mat4 mat = mat4(instanced.x, 0, 0, 0, 0, 1.0 + instanced.y, 0, 0, 0, 0, 1, 0, instanced.z, instanced.w, 0, 1)");
+		std::string code = sinfo.code;
+		code = replace(sinfo.code, "void main", "attribute mat4 MatrixW_Instanced; void main");
+		// code = replace(code, "mat4 mtxPVW = MatrixP * MatrixV * MatrixW;", "mat4 mtxPVW = MatrixP * MatrixV * MatrixW * (1.0 + 0.00001 * MatrixW_Instanced[0].x);");
+		code = replace(code, "mat4 mtxPVW = MatrixP * MatrixV * MatrixW;", "mat4 mtxPVW = MatrixP * MatrixV * MatrixW_Instanced;");
+		code = replace(code, "mat4 mat = fastanim_xform", "mat4 mat = MatrixW_Instanced");
 
 		info.ip = glCreateProgram();
 		info.ivs = glCreateShader(GL_VERTEX_SHADER);
@@ -221,9 +228,11 @@ void _stdcall Hook_glLinkProgram(int program) {
 		const int MAX_INFO_LOG_SIZE = 4096;
 		char g[MAX_INFO_LOG_SIZE] = { 0 };
 		glGetShaderInfoLog(info.ivs, MAX_INFO_LOG_SIZE - 1, nullptr, g);
+		assert(g[0] == '\0');
 
 		glLinkProgram(info.ip);
-		info.slot = glGetAttribLocation(info.ip, "instanced");
+		glGenVertexArrays(1, &info.vao);
+		info.slot = glGetAttribLocation(info.ip, "MatrixW_Instanced");
 		assert(info.slot != -1);
 	} else {
 		info.ip = 0;
@@ -232,14 +241,18 @@ void _stdcall Hook_glLinkProgram(int program) {
 
 void _stdcall Hook_glUseProgram(int program) {
 	if (ReplaceProgram) {
+		CheckError();
 		ProgramInfo* info = &mapProgramToInfo[program];
 		if (info->ip != 0) {
 			currentProgram = info;
 			glUseProgram(currentProgram->ip);
+			glBindVertexArray(currentProgram->vao);
 		} else {
 			currentProgram = NULL;
 			glUseProgram(program);
 		}
+
+		CheckError();
 	} else {
 		glUseProgram(program);
 	}
@@ -247,15 +260,18 @@ void _stdcall Hook_glUseProgram(int program) {
 
 static void BindWorldMatrices(int offset) {
 	int slot = currentProgram->slot;
+	assert(slot != -1);
 	CheckError();
-	glEnableVertexAttribArray(slot);
-	glBindBuffer(GL_ARRAY_BUFFER, instancedBuffer);
-	CheckError();
-	glVertexAttribPointer(slot, 4, GL_FLOAT, false, 0, (void*)(offset * sizeof(Vector)));
-	CheckError();
-	glVertexAttribDivisor(slot, 1);
-	glEnableVertexAttribArray(0);
-	CheckError();
+
+	for (int i = 0; i < 4; i++) {
+		glEnableVertexAttribArray(slot + i);
+		CheckError();
+		glBindBuffer(GL_ARRAY_BUFFER, instancedBuffer);
+		glVertexAttribPointer(slot + i, 4, GL_FLOAT, false, sizeof(Matrix), (void*)(offset * sizeof(Matrix) + i * sizeof(float) * 4));
+		CheckError();
+		glVertexAttribDivisor(slot + i, 1);
+		CheckError();
+	}
 }
 
 struct Object {
@@ -276,20 +292,23 @@ D ForceCast(T t) {
 void DrawArraysSprite();
 
 struct GLContext {
-	typedef void (__thiscall *PFNPREPAREVERTEXBUFFER)(void*, int, Object*);
+	typedef void(__thiscall *PFNPREPAREVERTEXBUFFER)(void*, int, Object*);
 	static PFNPREPAREVERTEXBUFFER PrepareMatrixTransposed;
 
-	typedef void (__thiscall *PFNBINDVERTEXBUFFER)(void*);
+	typedef void(__thiscall *PFNBINDVERTEXBUFFER)(void*);
 	static PFNBINDVERTEXBUFFER BindVertexBuffer;
 
 	typedef void* (__thiscall *PFNGETBUFFER)(void*, DWORD);
 	static PFNGETBUFFER GetBuffer;
-	
-	typedef void (__thiscall *PFNFREE)(void*, int);
+
+	typedef void(__thiscall *PFNFREE)(void*, int);
 	static PFNFREE Free;
 
+	bool GetGLAddresses(HMODULE glModule, HMODULE eglModule) {
+		glGenVertexArrays = (PFNGLGENVERTEXARRAYSPROC)GetProcAddress(glModule, "glGenVertexArraysOES");
+		if (glGenVertexArrays == NULL) return false; // libgles2.dll version error!
 
-	void GetGLAddresses(HMODULE glModule, HMODULE eglModule) {
+		glBindVertexArray = (PFNGLBINDVERTEXARRAYPROC)GetProcAddress(glModule, "glBindVertexArrayOES");
 		glBindBuffer = (PFNGLBINDBUFFERARBPROC)GetProcAddress(glModule, "glBindBuffer");
 		glBufferData = (PFNGLBUFFERDATAARBPROC)GetProcAddress(glModule, "glBufferData");
 		glGenBuffers = (PFNGLGENBUFFERSARBPROC)GetProcAddress(glModule, "glGenBuffers");
@@ -312,6 +331,7 @@ struct GLContext {
 		glGetError = (PFNGLGETERRORPROC)GetProcAddress(glModule, "glGetError");
 
 		eglSwapBuffers = (PFNEGLSWAPBUFFERSPROC)GetProcAddress(eglModule, "eglSwapBuffers");
+		return true;
 	}
 
 	void SetupGLHooks(HMODULE hModule, HMODULE glModule) {
@@ -397,14 +417,18 @@ struct GLContext {
 		HMODULE glModule = GetModuleHandleA("libglesv2.dll");
 		if (glModule == NULL)
 			return;
+
 		HMODULE eglModule = GetModuleHandleA("libEGL.dll");
 		if (eglModule == NULL)
 			return;
 
 		HMODULE hModule = GetModuleHandleA(NULL);
-		GetGLAddresses(glModule, eglModule);
-		SetupGLHooks(hModule, glModule);
-		SetupClientHooks(hModule);
+		if (GetGLAddresses(glModule, eglModule)) {
+			SetupGLHooks(hModule, glModule);
+			SetupClientHooks(hModule);
+		} else {
+			MessageBoxW(NULL, L"Unable to load OpenGL ES 3.0 extension. OpenGL optimization disabled. Reinstall the patch may help.\n无法加载OpenGL ES 3.0扩展，OpenGL优化已禁用。重新安装此补丁也许能解决问题。\n", L"DontStarveLuaJIT", MB_OK);
+		}
 	}
 } context;
 
@@ -415,10 +439,26 @@ void _stdcall DrawArraysSpriteImpl(Object* object, int first, int count, int pri
 	typedef void(__thiscall *PFNBINDMATERIAL)(void*);
 	PFNBINDMATERIAL BindMaterial = ForceCast<PFNBINDMATERIAL>(*(DWORD*)(*(const char**)_this + 8)); // 2nd virtual function of Context
 
-	int e = glGetError(); // eat error
 	BindMaterial(_this);
+	// glGetError(); // eat error
+	CheckError();
+	GLContext::PrepareMatrixTransposed(_this, 4, object);
+	CheckError();
+	GLContext::BindVertexBuffer(_this);
 	CheckError();
 
+	void* buffer = GLContext::GetBuffer(*(void**)((char*)_this + 444), *(DWORD*)((char*)_this + 44));
+
+	typedef void(__thiscall *PFNSETMATERIAL)(void*, DWORD, const char*);
+	PFNSETMATERIAL SetMaterial = ForceCast<PFNSETMATERIAL>(*(DWORD*)(*(DWORD*)buffer + 8));
+	SetMaterial(buffer, *(DWORD*)(_this + 420), (const char*)_this + 16);
+
+	if (*(DWORD*)(_this + 32) != -1) {
+		glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
+		*(DWORD*)(_this + 32) = -1;
+	}
+
+	static const int types[] = { 0, 3, 2, 1, 5, 6, 4, 3, 0 };
 	if (currentProgram != NULL) {
 		size_t current = updatedInstancedBufferCount;
 		CheckError();
@@ -428,25 +468,7 @@ void _stdcall DrawArraysSpriteImpl(Object* object, int first, int count, int pri
 		CheckError();
 		BindWorldMatrices(current);
 		CheckError();
-	}
 
-	GLContext::PrepareMatrixTransposed(_this, 4, object);
-		CheckError();
-	GLContext::BindVertexBuffer(_this);
-		CheckError();
-	void* buffer = GLContext::GetBuffer(*(void**)((char*)_this + 444), *(DWORD*)((char*)_this + 44));
-
-	typedef void(__thiscall *PFNSETMATERIAL)(void*, DWORD, const char*);
-	PFNSETMATERIAL SetMaterial = ForceCast<PFNSETMATERIAL>(*(DWORD*)(*(DWORD*)buffer + 8));
-	SetMaterial(buffer, *(DWORD*)(_this + 420), (const char*)_this + 16);
-
-	if (*(DWORD *)(_this + 32) != -1) {
-		glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
-		*(DWORD *)(_this + 32) = -1;
-	}
-
-	static int types[] = { 0, 3, 2, 1, 5, 6, 4, 3, 0 };
-	if (currentProgram != NULL) {
 		// glDrawArrays(types[primType], first, count);
 		CheckError();
 		glDrawArraysInstanced(types[primType], first, count, 1);

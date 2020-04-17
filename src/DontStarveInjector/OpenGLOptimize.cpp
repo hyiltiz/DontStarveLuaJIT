@@ -157,7 +157,7 @@ struct ProgramInfo {
 	int fs;
 	int ivs;
 	int ip;
-	int slot;
+	int slot[4];
 	int vao;
 } *currentProgram;
 
@@ -213,10 +213,14 @@ void _stdcall Hook_glLinkProgram(int program) {
 
 	if (sinfo.code.find("mat4 mtxPVW = MatrixP * MatrixV * MatrixW;") != std::string::npos) {
 		std::string code = sinfo.code;
-		code = replace(sinfo.code, "void main", "attribute mat4 MatrixW_Instanced; void main");
+		code = replace(sinfo.code, "void main", "attribute vec4 M0;"
+			"attribute vec4 M1;"
+			"attribute vec4 M2;"
+			"attribute vec4 M3;"
+			"void main");
 		// code = replace(code, "mat4 mtxPVW = MatrixP * MatrixV * MatrixW;", "mat4 mtxPVW = MatrixP * MatrixV * MatrixW * (1.0 + 0.00001 * MatrixW_Instanced[0].x);");
-		code = replace(code, "mat4 mtxPVW = MatrixP * MatrixV * MatrixW;", "mat4 mtxPVW = MatrixP * MatrixV * MatrixW_Instanced;");
-		code = replace(code, "mat4 mat = fastanim_xform", "mat4 mat = MatrixW_Instanced");
+		code = replace(code, "mat4 mtxPVW = MatrixP * MatrixV * MatrixW;", "mat4 mtxPVW = MatrixP * MatrixV * mat4(M0, M1, M2, M3);");
+		code = replace(code, "mat4 mat = fastanim_xform", "mat4 mat = fastanim_xform * mat4(M0, M1, M2, M3)");
 
 		info.ip = glCreateProgram();
 		info.ivs = glCreateShader(GL_VERTEX_SHADER);
@@ -227,13 +231,15 @@ void _stdcall Hook_glLinkProgram(int program) {
 		glAttachShader(info.ip, info.fs);
 		const int MAX_INFO_LOG_SIZE = 4096;
 		char g[MAX_INFO_LOG_SIZE] = { 0 };
-		glGetShaderInfoLog(info.ivs, MAX_INFO_LOG_SIZE - 1, nullptr, g);
+		glGetShaderInfoLog(info.ivs, MAX_INFO_LOG_SIZE - 1, NULL, g);
 		assert(g[0] == '\0');
 
 		glLinkProgram(info.ip);
 		glGenVertexArrays(1, &info.vao);
-		info.slot = glGetAttribLocation(info.ip, "MatrixW_Instanced");
-		assert(info.slot != -1);
+		info.slot[0] = glGetAttribLocation(info.ip, "M0");
+		info.slot[1] = glGetAttribLocation(info.ip, "M1");
+		info.slot[2] = glGetAttribLocation(info.ip, "M2");
+		info.slot[3] = glGetAttribLocation(info.ip, "M3");
 	} else {
 		info.ip = 0;
 	}
@@ -246,7 +252,6 @@ void _stdcall Hook_glUseProgram(int program) {
 		if (info->ip != 0) {
 			currentProgram = info;
 			glUseProgram(currentProgram->ip);
-			glBindVertexArray(currentProgram->vao);
 		} else {
 			currentProgram = NULL;
 			glUseProgram(program);
@@ -259,17 +264,16 @@ void _stdcall Hook_glUseProgram(int program) {
 }
 
 static void BindWorldMatrices(int offset) {
-	int slot = currentProgram->slot;
-	assert(slot != -1);
+	int* slot = currentProgram->slot;
 	CheckError();
 
+	glBindBuffer(GL_ARRAY_BUFFER, instancedBuffer);
 	for (int i = 0; i < 4; i++) {
-		glEnableVertexAttribArray(slot + i);
+		glEnableVertexAttribArray(slot[i]);
 		CheckError();
-		glBindBuffer(GL_ARRAY_BUFFER, instancedBuffer);
-		glVertexAttribPointer(slot + i, 4, GL_FLOAT, false, sizeof(Matrix), (void*)(offset * sizeof(Matrix) + i * sizeof(float) * 4));
+		glVertexAttribPointer(slot[i], 4, GL_FLOAT, false, sizeof(Matrix), (void*)(offset * sizeof(Matrix) + i * sizeof(float) * 4));
 		CheckError();
-		glVertexAttribDivisor(slot + i, 1);
+		glVertexAttribDivisor(slot[i], 1);
 		CheckError();
 	}
 }
@@ -440,6 +444,10 @@ void _stdcall DrawArraysSpriteImpl(Object* object, int first, int count, int pri
 	PFNBINDMATERIAL BindMaterial = ForceCast<PFNBINDMATERIAL>(*(DWORD*)(*(const char**)_this + 8)); // 2nd virtual function of Context
 
 	BindMaterial(_this);
+	if (currentProgram != NULL) {
+		glBindVertexArray(currentProgram->vao);
+	}
+
 	// glGetError(); // eat error
 	CheckError();
 	GLContext::PrepareMatrixTransposed(_this, 4, object);
@@ -452,7 +460,7 @@ void _stdcall DrawArraysSpriteImpl(Object* object, int first, int count, int pri
 	typedef void(__thiscall *PFNSETMATERIAL)(void*, DWORD, const char*);
 	PFNSETMATERIAL SetMaterial = ForceCast<PFNSETMATERIAL>(*(DWORD*)(*(DWORD*)buffer + 8));
 	SetMaterial(buffer, *(DWORD*)(_this + 420), (const char*)_this + 16);
-
+	
 	if (*(DWORD*)(_this + 32) != -1) {
 		glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
 		*(DWORD*)(_this + 32) = -1;
@@ -460,6 +468,7 @@ void _stdcall DrawArraysSpriteImpl(Object* object, int first, int count, int pri
 
 	static const int types[] = { 0, 3, 2, 1, 5, 6, 4, 3, 0 };
 	if (currentProgram != NULL) {
+		// glDrawArrays(types[primType], first, count);
 		size_t current = updatedInstancedBufferCount;
 		CheckError();
 		AddSpriteWorldMatrix(object->worldTransform);
@@ -467,9 +476,6 @@ void _stdcall DrawArraysSpriteImpl(Object* object, int first, int count, int pri
 		UpdateWorldMatrices();
 		CheckError();
 		BindWorldMatrices(current);
-		CheckError();
-
-		// glDrawArrays(types[primType], first, count);
 		CheckError();
 		glDrawArraysInstanced(types[primType], first, count, 1);
 		CheckError();
